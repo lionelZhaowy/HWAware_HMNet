@@ -40,7 +40,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from timm.models.layers import trunc_normal_
+from timm.layers import trunc_normal_
 from torch_scatter import scatter
 
 from .vit import Mlp, CrossAttention, PositionEmbedding1D, PositionEmbedding2D, PatchMergingCross, SeqData, TransformerBlock
@@ -976,7 +976,7 @@ class EventEmbedding(BlockBase):
         x = torch.arange(x_size, device=device, dtype=torch.float)
         y = torch.arange(y_size, device=device, dtype=torch.float)
         p = torch.tensor([-1,1], device=device, dtype=torch.float)
-        t, x, y, p = torch.meshgrid(t, x, y, p)
+        t, x, y, p = torch.meshgrid(t, x, y, p, indexing='ij')
 
         # get embeddings
         xy_embedding = self.xy(x.reshape(-1), y.reshape(-1))

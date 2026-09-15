@@ -43,14 +43,9 @@ def collate_keep_dict(batch):
     elem = batch[0]
     elem_type = type(elem)
     if isinstance(elem, torch.Tensor):
-        out = None
-        if torch.utils.data.get_worker_info() is not None:
-            # If we're in a background process, concatenate directly into a
-            # shared memory tensor to avoid an extra copy
-            numel = sum(x.numel() for x in batch)
-            storage = elem.storage()._new_shared(numel)
-            out = elem.new(storage).resize_(len(batch), *list(elem.size()))
-        return torch.stack(batch, 0, out=out)
+        # Delegate tensor stacking and worker shared-memory allocation to PyTorch.
+        # Keep the custom mapping/list semantics below for variable-length events.
+        return torch.utils.data.default_collate(batch)
     elif elem_type.__module__ == 'numpy' and elem_type.__name__ != 'str_' \
             and elem_type.__name__ != 'string_':
         if elem_type.__name__ == 'ndarray' or elem_type.__name__ == 'memmap':

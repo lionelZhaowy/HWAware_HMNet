@@ -124,7 +124,7 @@ class ResNetGRU(BlockBase):
 
     @torch.jit.ignore
     def load_from_imagenet(self, model_path, adjust_inc=False):
-        resnet_dict = torch.load(model_path)
+        resnet_dict = torch.load(model_path, weights_only=False)
         self.entry.load_from_resnet(resnet_dict, adjust_inc)
         self.layer1.load_from_resnet(resnet_dict)
         self.layer2.load_from_resnet(resnet_dict)

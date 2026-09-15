@@ -35,30 +35,46 @@ The pre-trained weights are released under the Creative Commons BY-SA 4.0 Licens
 | HMNet-B3 w/ RGB | 346 x 260 | 0.252 | 6.972 | 0.318 | 5.4 | 4.1 | [github](https://github.com/hamarh/HMNet_pth/releases/download/v0.2.0/mvsec_hmnet_B3_fuse_rgb.pth) |
 | HMNet-L3 w/ RGB | 346 x 260 | 0.230 | 6.922 | 0.310 | 7.1 | 5.4 | [github](https://github.com/hamarh/HMNet_pth/releases/download/v0.2.0/mvsec_hmnet_L3_fuse_rgb.pth) |
 
-# Requirements
+# Environment (maintained server configuration)
 
-- PyTorch >= 1.12.1
-- torch_scatter
-- timm
-- hdf5plugin
+当前工程已适配服务器上的 `/opt/miniconda3/envs/pytorch`：Python 3.12.2、
+PyTorch 2.5.0 / torchvision 0.20.0、Torch CUDA 12.1、NumPy 1.26.4、timm 1.0.15。
+原始 Python 3.7 / PyTorch 1.12 安装步骤不再作为当前 checkout 的默认方案。
+完整检查、安装记录、运行方法和限制见
+[环境配置与兼容性记录](docs/03_pytorch环境配置与兼容性记录.md)。
 
-# Installation
-
-Create a new conda environment
-
-```bash
-conda create -n hmnet python=3.7
-conda activate hmnet
-```
-
-Install dependencies
+## Run with the existing environment
 
 ```bash
-pip install -r requirements.txt
-conda install pytorch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1 cudatoolkit=11.3 -c pytorch
-pip install torch-scatter -f https://data.pyg.org/whl/torch-1.12.1+cu113.html
-pip install timm
+# At repository root; sets PYTHONPATH and defaults MKL_THREADING_LAYER to GNU.
+./scripts/hmnet-python -c 'import torch, torch_scatter; print(torch.__version__, torch.version.cuda)'
+
+# Compatibility checks only; no dataset or HMNet forward/training.
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 ./scripts/hmnet-python -B -m pytest tests/test_environment_compatibility.py -q
+
+# From a task directory, use the same launcher:
+cd experiments/detection
+../../scripts/hmnet-python scripts/train.py --help
 ```
+
+## Dependencies
+
+`requirements.txt` lists the maintained runtime stack. The shared server environment
+already has these packages; no reinstall is needed. To fill missing packages in the
+same base environment, preserve its existing versions:
+
+```bash
+./scripts/hmnet-python -m pip install --only-binary=:all: -r requirements.txt -c requirements/pytorch-baseline-constraints.txt
+./scripts/hmnet-python scripts/setup_psee_toolbox.py
+```
+
+The constraint file is a snapshot of this server's existing Conda/Pip packages,
+not a portable recipe for an empty environment. Install matching PyTorch/CUDA
+first on another machine; the pinned `torch-scatter` wheel targets Torch 2.5 and
+CUDA 12.1. `setup_psee_toolbox.py` installs the pinned official GEN1 tools, including
+the license, into the ignored `hmnet/utils/psee_toolbox/` directory. No dataset or
+weights are downloaded by these commands. Pytest is a development dependency
+(already installed here as 7.4.4).
 
 # Experiments
 

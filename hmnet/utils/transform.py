@@ -1909,10 +1909,10 @@ def _split_bands(img):
 
 RESAMPLING = {
     'PIL': {
-        'NEAREST' : Image.NEAREST,
-        'BILINEAR': Image.BILINEAR,
-        'BICUBIC' : Image.BICUBIC,
-        'LANCZOS' : Image.LANCZOS,
+        'NEAREST' : Image.Resampling.NEAREST,
+        'BILINEAR': Image.Resampling.BILINEAR,
+        'BICUBIC' : Image.Resampling.BICUBIC,
+        'LANCZOS' : Image.Resampling.LANCZOS,
     },
     'OpenCV': {
         'NEAREST' : cv2.INTER_NEAREST,

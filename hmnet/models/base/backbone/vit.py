@@ -36,7 +36,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
-from timm.models.layers import DropPath, trunc_normal_
+from timm.layers import DropPath, trunc_normal_
 from torch_scatter import scatter
 
 from ..init import init_transformer, load_state_dict_flexible
@@ -231,7 +231,7 @@ class VisionTransformer(BlockBase):
 
     def load_from_pretrained(self, fpath_pretrained):
         src_dict = {}
-        org_dict = torch.load(fpath_pretrained)
+        org_dict = torch.load(fpath_pretrained, weights_only=False)
         for key, value in org_dict.items():
             key = key.replace('layers.3', 'layers.4')
             key = key.replace('layers.2', 'layers.3')
@@ -805,7 +805,7 @@ class PositionBias(BlockBase):
             # generate mother-set
             position_bias_h = torch.arange(1 - h, h)
             position_bias_w = torch.arange(1 - w, w)
-            inputs_for_table = torch.stack(torch.meshgrid([position_bias_h, position_bias_w]))
+            inputs_for_table = torch.stack(torch.meshgrid([position_bias_h, position_bias_w], indexing='ij'))
             inputs_for_table = inputs_for_table.flatten(1).transpose(0, 1).float()    # (2h-1 * 2w-1, 2)
             self.register_buffer("inputs_for_table", inputs_for_table)
         else:
@@ -846,7 +846,7 @@ class PositionBias(BlockBase):
     def _grid_coords(self, h: int, w: int) -> Tensor:
         coords_h = torch.arange(h)
         coords_w = torch.arange(w)
-        return torch.stack(torch.meshgrid([coords_h, coords_w])).view(2, h*w).transpose(1, 0).contiguous()    # (L, 2)
+        return torch.stack(torch.meshgrid([coords_h, coords_w], indexing='ij')).view(2, h*w).transpose(1, 0).contiguous()    # (L, 2)
 
     def _to_table_indices(self, relative_coords: Tensor, h: int, w: int) -> Tensor:
         relative_coords[:, :, 0] += h - 1  # shift to start from 0
@@ -1139,8 +1139,8 @@ def get_relative_position_indices(window1: Tuple[int], window2: Tuple[int]) -> T
     s1 = (w2 / w1).clip(min=1)
     s2 = (w1 / w2).clip(min=1)
 
-    coords1 = torch.stack(torch.meshgrid([ torch.arange(n) * int(s) for s, n in zip(s1, w1) ])).view(ndim, -1)
-    coords2 = torch.stack(torch.meshgrid([ torch.arange(n) * int(s) for s, n in zip(s2, w2) ])).view(ndim, -1)
+    coords1 = torch.stack(torch.meshgrid([ torch.arange(n) * int(s) for s, n in zip(s1, w1) ], indexing='ij')).view(ndim, -1)
+    coords2 = torch.stack(torch.meshgrid([ torch.arange(n) * int(s) for s, n in zip(s2, w2) ], indexing='ij')).view(ndim, -1)
     relative_coords = (coords2[:, None, :] - coords1[:, :, None]).view(ndim, -1)
     relative_coords -= relative_coords.amin(dim=1, keepdims=True)
     table_size = (relative_coords.amax(dim=1) + 1).tolist()
@@ -1234,7 +1234,7 @@ class PositionEmbedding2D(nn.Module):
 
     def generate_param_table(self) -> None:
         if not self.has_table and self.dynamic:
-            x, y = torch.meshgrid([ torch.arange(self.x_size), torch.arange(self.y_size) ])
+            x, y = torch.meshgrid([ torch.arange(self.x_size), torch.arange(self.y_size) ], indexing='ij')
             data = torch.stack([x, y], dim=-1).view(-1,2).float()
             data = data.to(self.embed[0].linear.weight.device)
             if self.shift_normalize:
@@ -1296,7 +1296,7 @@ class PositionEmbedding(nn.Module):
 
     def generate_param_table(self) -> None:
         if not self.has_table and self.dynamic:
-            data = torch.stack(torch.meshgrid([ torch.arange(s) for s in self.table_size ]), dim=-1).view(-1,len(table_size)).float()
+            data = torch.stack(torch.meshgrid([ torch.arange(s) for s in self.table_size ], indexing='ij'), dim=-1).view(-1,len(table_size)).float()
             data = data.to(self.embed[0].linear.weight.device)
             if self.shift_normalize:
                 data = data - torch.FloatTensor(self.table_size, device=data.device) * 0.5

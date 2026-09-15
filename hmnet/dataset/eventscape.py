@@ -210,7 +210,7 @@ class EventPacket(torch.utils.data.Dataset):
             events[:,-1] = ((events[:,-1] + 1) * 0.5)    # polarity in {0, 1}
             events = events.astype(np.int64)
         elif self.output_type == 'float':
-            events = events.astype(np.float)             # polarity in {-1.0, 1.0}
+            events = events.astype(float)             # polarity in {-1.0, 1.0}
         else:
             raise RuntimeError
 

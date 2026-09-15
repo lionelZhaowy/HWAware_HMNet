@@ -52,13 +52,13 @@ import os
 import numpy as np
 import sys
 import copy
-from importlib import machinery
+from hmnet.utils.config import load_config
 from PIL import Image
 from functools import partial
 from numpy.lib import recfunctions as rfn
 
 import torch
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 from hmnet.dataset.custom_collate_fn import collate_keep_dict
 from hmnet.utils.common import fix_seed, get_list, get_chunk, mkdir, makedirs, Timer
 
@@ -133,7 +133,7 @@ def main(config):
             if getattr(config, 'to_device_in_model', False) == False:
                 events = to_device(events, config.device)
 
-            with autocast(enabled=config.fp16):
+            with autocast("cuda", enabled=config.fp16):
                 list_bbox_dict, image_metas = model.inference(events, image_metas, speed_test=config.speed_test)    # outputs = list[tuple[bboxes, labels]], bboxes: N x (tl_x, tl_y, br_x, br_y, score), labels: N
             
             if loader.dataset.event_transform is not None:
@@ -210,14 +210,14 @@ def to_device(data, device, non_blocking=True):
         return data
 
 def get_state_dict(fpath, device):
-    state_dict = torch.load(fpath, map_location=device)
+    state_dict = torch.load(fpath, map_location=device, weights_only=False)
     if 'state_dict' in state_dict:
         return state_dict['state_dict']
     else:
         return state_dict
 
 def get_config(args):
-    config_module = machinery.SourceFileLoader('config', args.config).load_module()
+    config_module = load_config(args.config)
     config = config_module.TestSettings()
 
     config.fpath_evt_lst = f'{args.data_list}/events.txt'

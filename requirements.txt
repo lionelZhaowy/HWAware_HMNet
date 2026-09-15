@@ -1,3 +1,17 @@
-pybind11
-hdf5plugin
-pandas
+# Verified target: Python 3.12, PyTorch 2.5.0, CUDA 12.1 (Linux).
+# Install torch/torchvision through the existing Conda environment first.
+# The extension wheel must match torch.version.cuda, not nvidia-smi's CUDA label.
+--find-links https://data.pyg.org/whl/torch-2.5.0+cu121.html
+torch==2.5.0
+torchvision==0.20.0
+torch-scatter==2.1.2+pt25cu121
+timm==1.0.15
+numpy==1.26.4
+pandas==2.2.3
+h5py==3.12.1
+hdf5plugin==5.0.0
+Pillow==10.4.0
+# Existing Conda build reports 4.10.0; PyPI wheels may append a build suffix.
+opencv-python>=4.10,<4.11
+pycocotools==2.0.8
+pybind11==2.13.6

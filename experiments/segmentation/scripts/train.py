@@ -53,7 +53,7 @@ import numpy as np
 import time
 timer = time.perf_counter
 import logging
-from importlib import machinery
+from hmnet.utils.config import load_config
 from collections import OrderedDict
 import traceback
 from copy import deepcopy
@@ -61,7 +61,7 @@ from copy import deepcopy
 import torch
 import torch.nn as nn
 import torch.distributed as dist
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 import torch.multiprocessing as mp
 
 from hmnet.models.base.init import load_state_dict_matched
@@ -194,7 +194,7 @@ def train(epoch, loader, model, optimizer, scheduler, scaler, rank, config):
 
             # forward
             if config.amp:
-                with autocast(enabled=True):
+                with autocast("cuda", enabled=True):
                     outputs = model(events, images, image_metas, labels, init_states=seg_idx==0)
                 loss = outputs['loss']
                 loss_reports = outputs['log_vars']
@@ -420,7 +420,7 @@ def set_optimizer(model, config):
 
     scheduler = config.lr_scheduler(optimizer, **config.lrsch_params)
 
-    scaler = GradScaler()
+    scaler = GradScaler("cuda")
 
     return optimizer, scheduler, scaler
 
@@ -466,7 +466,7 @@ def to_device(data, device, non_blocking=True):
 def load_params_if_specified(model, rank, config):
     fpath_load = getattr(config, 'load', '')
     if fpath_load is not None and fpath_load != '':
-        state_dict = torch.load(fpath_load, map_location=config.device)['state_dict']
+        state_dict = torch.load(fpath_load, map_location=config.device, weights_only=False)['state_dict']
         no_matching = load_state_dict_matched(model, state_dict)
         for key in no_matching:
             print_log('No matching key. Skip loading %s' % key, rank, config)
@@ -478,7 +478,7 @@ def resume_if_specified(model, optimizer, scaler, config):
     fpath_checkpoint = config.dpath_out + '/' + config.resume
     if os.path.isfile(fpath_checkpoint):
         print("=> loading checkpoint '{}'".format(fpath_checkpoint))
-        checkpoint = torch.load(fpath_checkpoint, map_location=config.device)
+        checkpoint = torch.load(fpath_checkpoint, map_location=config.device, weights_only=False)
 
         state_dict = checkpoint['state_dict']
         config.start_epoch = checkpoint['epoch']
@@ -532,7 +532,7 @@ def set_meter(rank, config):
     config.meter = meter
 
 def get_config(args):
-    config_module = machinery.SourceFileLoader('config', args.config).load_module()
+    config_module = load_config(args.config)
     config = config_module.TrainSettings()
     config.dpath_out = './workspace/'+args.name
     config.name = args.name

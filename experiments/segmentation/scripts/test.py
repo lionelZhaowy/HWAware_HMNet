@@ -58,13 +58,13 @@ import os
 import numpy as np
 import sys
 import copy
-from importlib import machinery
+from hmnet.utils.config import load_config
 from PIL import Image
 from functools import partial
 from numpy.lib import recfunctions as rfn
 
 import torch
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 from hmnet.dataset.custom_collate_fn import collate_keep_dict
 from hmnet.utils.common import fix_seed, get_list, get_chunk, mkdir, makedirs, Timer
 
@@ -137,7 +137,7 @@ def main(config):
                 events = to_device(events, config.device)
                 images = to_device(images, config.device)
 
-            with autocast(enabled=config.fp16):
+            with autocast("cuda", enabled=config.fp16):
                 preds, out_image_metas = model.inference(events, images, image_metas, speed_test=config.speed_test)
             
             if loader.dataset.event_transform is not None:
@@ -151,7 +151,7 @@ def main(config):
             # for debug
             if DEBUG:
                 #torch.save(preds, f'{PREFIX}_{i}.pth')
-                preds_ref = torch.load(f'{PREFIX}_{i}.pth', map_location='cpu')
+                preds_ref = torch.load(f'{PREFIX}_{i}.pth', map_location='cpu', weights_only=False)
                 max_idx = preds_ref.argmax(dim=1, keepdim=True)
                 a = preds_ref.gather(dim=1, index=max_idx)
                 b = preds[-1:].gather(dim=1, index=max_idx)
@@ -222,14 +222,14 @@ def to_device(data, device, non_blocking=True):
         return data
 
 def get_state_dict(fpath, device):
-    state_dict = torch.load(fpath, map_location=device)
+    state_dict = torch.load(fpath, map_location=device, weights_only=False)
     if 'state_dict' in state_dict:
         return state_dict['state_dict']
     else:
         return state_dict
 
 def get_config(args):
-    config_module = machinery.SourceFileLoader('config', args.config).load_module()
+    config_module = load_config(args.config)
     config = config_module.TestSettings()
 
     config.fpath_evt_lst = f'{args.data_list}/events.txt'

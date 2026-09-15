@@ -50,7 +50,7 @@ class PPM(BlockBase):
         x_size = x.size()
         out = [x]
         for f in self.features:
-            out.append(F.upsample(f(x), x_size[2:], mode='bilinear', align_corners=True))
+            out.append(F.interpolate(f(x), x_size[2:], mode='bilinear', align_corners=True))
         out = torch.cat(out, 1)
         return out
 

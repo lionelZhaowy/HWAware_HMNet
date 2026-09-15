@@ -264,7 +264,7 @@ class OhemCrossEntropy(nn.Module):
         ph, pw = score.size(2), score.size(3)
         h, w = target.size(1), target.size(2)
         if ph != h or pw != w:
-            score = F.upsample(input=score, size=(h, w), mode='bilinear')
+            score = F.interpolate(input=score, size=(h, w), mode='bilinear')
         pred = F.softmax(score, dim=1)
         pixel_losses = self.criterion(score, target).contiguous().view(-1)
         mask = target.contiguous().view(-1) != self.ignore_label         

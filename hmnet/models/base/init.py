@@ -118,7 +118,7 @@ def load_state_dict_matched(model, src_dict, device=torch.device('cpu')):
     no_matching = []
     tar_dict = model.state_dict()
     if isinstance(src_dict, str):
-        src_dict = torch.load(src_dict, map_location=device)
+        src_dict = torch.load(src_dict, map_location=device, weights_only=False)
         if 'state_dict' in src_dict:
             src_dict = src_dict['state_dict']
 
@@ -134,7 +134,7 @@ def load_state_dict_flexible(model, src_dict, key_matching='gestalt', device=tor
     assert key_matching in ('gestalt', 'strict')
     dst_dict = model.state_dict()
     if isinstance(src_dict, str):
-        src_dict = torch.load(src_dict, map_location=device)
+        src_dict = torch.load(src_dict, map_location=device, weights_only=False)
         if 'state_dict' in src_dict:
             src_dict = src_dict['state_dict']
 

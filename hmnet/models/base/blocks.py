@@ -32,7 +32,7 @@ import itertools
 import torch
 import torch.nn as nn
 from torch.nn.utils import clip_grad_norm_, clip_grad_value_
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 from collections import OrderedDict
 
 from torch import Tensor
@@ -223,7 +223,7 @@ class BlockBase(nn.Module):
         if PTH2:
             if backend == 'jit':
                 #model = torch.jit.script(self)
-                #with autocast(enabled=fp16):
+                #with autocast("cuda", enabled=fp16):
                 #    model = torch.jit.trace(self, get_inputs(input_shapes, dtype, device))
                 model = torch.jit.trace(self, get_inputs(input_shapes, torch.float, device))
                 return model
@@ -231,7 +231,7 @@ class BlockBase(nn.Module):
                 import torch_tensorrt
                 model = torch.jit.trace(self, get_inputs(input_shapes, torch.float, device))
                 #model = torch_tensorrt.compile(model, inputs=get_inputs(input_shapes, torch.float, device), enabled_precisions={torch.float, torch.half}, truncate_long_and_double=True)
-                with autocast(enabled=fp16):
+                with autocast("cuda", enabled=fp16):
                     #model = torch_tensorrt.compile(model, inputs=get_inputs(input_shapes, dtype, device), enabled_precisions={dtype}, truncate_long_and_double=True)
                     model = torch_tensorrt.compile(model, inputs=get_inputs(input_shapes, dtype, device), enabled_precisions={torch.float, torch.half}, truncate_long_and_double=True)
                 return model

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Project-local runtime settings; does not modify the shared Conda environment.
+set -euo pipefail
+HMNET_PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+HMNET_PYTHON="${HMNET_PYTHON:-/opt/miniconda3/envs/pytorch/bin/python}"
+export PYTHONPATH="${HMNET_PROJECT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+# This server's MKL INTEL layer conflicts with PyTorch's libgomp in workers.
+export MKL_THREADING_LAYER="${MKL_THREADING_LAYER:-GNU}"
+exec "${HMNET_PYTHON}" "$@"
