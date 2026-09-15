@@ -42,23 +42,22 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
-from timm.models.layers import trunc_normal_
+from timm.layers import trunc_normal_
 from torch_scatter import scatter
 
 
-from torchtools.base_models.backbone.vit import MobileViTAttachment, Mlp, TokenGrouping, QKVTransform, CrossAttention, PositionEmbedding1D, PositionEmbedding2D, PatchMergingCross, SeqData, TransformerBlock, SparseAttentionBlock, Stage
-from torchtools.base_models.layers import ConvBlock, Linear, MV2Block, UpConvBlock, ConvPixelShuffle
-from torchtools.base_models.backbone.resnet import ResBlock, ResStage, ResEntry
-from torchtools.base_models.backbone.convnext import ConvNeXtBlock, ConvNeXtEntry, ConvNeXtStage
-from torchtools.base_models.blocks import BlockBase
-from torchtools.init import init_transformer, load_state_dict_matched
-from torchtools.utils import adapt_bn_momentum_for_checkpointing
+from ..vit import MobileViTAttachment, Mlp, TokenGrouping, QKVTransform, CrossAttention, PositionEmbedding1D, PositionEmbedding2D, PatchMergingCross, SeqData, TransformerBlock, SparseAttentionBlock, Stage
+from ...layers import ConvBlock, Linear, MV2Block, UpConvBlock, ConvPixelShuffle
+from ..resnet import ResBlock, ResStage, ResEntry
+from ..convnext import ConvNeXtBlock, ConvNeXtEntry, ConvNeXtStage
+from ...blocks import BlockBase
+from ...init import init_transformer, load_state_dict_matched
 
 from torch import Tensor
 from typing import Tuple, List, Optional, Dict
 Meta = Dict[str,Tuple[int,int,int]]
 
-from common.utils import Timer
+from hmnet.utils.common import Timer
 timer = Timer()
 
 class HEMBackboneL1(BlockBase):

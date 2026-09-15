@@ -42,6 +42,8 @@ PyTorch 2.5.0 / torchvision 0.20.0、Torch CUDA 12.1、NumPy 1.26.4、timm 1.0.1
 原始 Python 3.7 / PyTorch 1.12 安装步骤不再作为当前 checkout 的默认方案。
 完整检查、安装记录、运行方法和限制见
 [环境配置与兼容性记录](docs/03_pytorch环境配置与兼容性记录.md)。
+第1–3项补充修复已完成，CPU/CUDA严格警告检查通过。数据、元数据与权重链接见
+[下载清单](docs/04_数据集与权重下载清单.md)；尚未下载或开展真实数据冒烟测试。
 
 ## Run with the existing environment
 
@@ -64,7 +66,7 @@ already has these packages; no reinstall is needed. To fill missing packages in 
 same base environment, preserve its existing versions:
 
 ```bash
-./scripts/hmnet-python -m pip install --only-binary=:all: -r requirements.txt -c requirements/pytorch-baseline-constraints.txt
+./scripts/hmnet-python -m pip install --only-binary=:all: -r requirements.txt -c requirements/pytorch-current-constraints.txt
 ./scripts/hmnet-python scripts/setup_psee_toolbox.py
 ```
 

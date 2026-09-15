@@ -2,6 +2,18 @@
 
 日期：2026-09-15。环境：`/opt/miniconda3/envs/pytorch`。本轮按用户新指令安装缺失依赖并维护过时API；上一轮仅文档的执行边界不再限制这些已明确授权的环境修改。
 
+## 本次补充处理摘要
+
+按后续指令，第6节原第1–3项已处理；第4项暂不处理，第5项只整理下载链接，第6项待真实数据和权重就绪后验证。以下第1–5节保留首次环境维护的历史记录，**当前结果以第7节为准**。补充处理起点commit：`1859ececd837a9ce7919eee020e22e73c40c5288`。
+
+| 本次处理 | 当前结果 |
+|---|---|
+| qonnx依赖声明、无效`~vitop`残留 | `pip check`通过；保留现有GPU Runtime，残留已备份移出 |
+| 第三方弃用警告 | 移除误装的Web Apex；protobuf 5.29.5；严格警告模式下回归通过 |
+| 两份old骨干 | 修正语法与历史导入，均可导入；未验证旧算法完整前向 |
+| 回归 | CPU 43 passed / 1 skipped；CUDA 1 passed；124个Python文件语法通过 |
+| 数据/权重 | 未下载；见[下载清单](04_数据集与权重下载清单.md)，包含MVSEC元数据失效链接说明 |
+
 ## 1. 完成结果
 
 初始工作区干净，当前基准commit为 `7ce2fda048a963eba96b246408f216e026296284`（包含上一轮学习文档）。本轮未提交commit、未切换分支。
@@ -127,13 +139,70 @@ CUDA_VISIBLE_DEVICES=1 HMNET_TEST_CUDA=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 ./s
 
 安装审计：[before](../artifacts/environment/pytorch-before.txt)、[after](../artifacts/environment/pytorch-after.txt)、[scatter安装报告](../artifacts/environment/scatter-install.txt)、[pybind11安装报告](../artifacts/environment/pybind11-install.txt)。报告使用`.txt`保存结构化JSON，避免仓库原有`*.json`忽略规则隐藏记录。
 
-## 6. 尚未解决或不在本轮范围内
+## 6. 原问题清单的当前状态
 
-1. 共享环境原本的`pip check`报`qonnx 1.0.0 requires onnxruntime`；pip另报无效distribution `~vitop`。本轮不安装无关ONNX Runtime、不删除其他工程包残留，两个问题仍存在。
-2. 测试有第三方包`pkg_resources`/namespace、WebOb/cgi、protobuf的弃用警告，未导致失败；没有为清警告升级共享依赖。
-3. `hmnet/models/base/backbone/old/hmnet.py`有原始语法错误（约848行`> nn.Module`），`old/hmnetL1.py`还引用旧`common.utils/torchtools`。它们未被当前builder/22个配置选择，按历史代码保留；不要对整个仓库声称零语法问题。
-4. TensorRT/ONNX/旧`aot_ts_nvfuser`等可选导出路径未验证、未补装。当前环境完成的是原生PyTorch三任务主路径的依赖与API维护。
-5. 官方数据、元数据、权重仍未下载。下一阶段应先选择数据集与存储目录并准备数据，再做真实样本HMNet完整前后向/短训练/checkpoint恢复/流式推理。
-6. 先前文档中的数据对齐、空监督集合、检测idx_offset、RGB固定通道等静态疑点仍保留。环境通过不代表这些问题消失，更不代表算法精度已复现。
+1. **已处理**：qonnx使用明确标识的本地GPU依赖修订版`1.0.0+ortgpu`，实际依赖原有`onnxruntime-gpu 1.20.2`；`pip check`返回0。无效`~vitop`目录已备份移出site-packages，正常`nvitop 1.3.2`保留。
+2. **已处理原记录中的警告**：移除与NVIDIA Apex同名的Web框架包`apex 0.9.10.dev0`，使timm使用原生PyTorch实现；protobuf升级到5.29.5。HMNet回归及共享依赖检查均在DeprecationWarning/FutureWarning视为错误时通过。未对全环境设置警告屏蔽，也未升级仍留供其他工程使用的Pyramid/WebOb。
+3. **已处理所列语法和导入阻塞**：两份`old`文件改用仓库内现有模块，修复`> nn.Module`为`-> nn.Module`，删除未使用的旧工具导入。两份模块已纳入导入回归；没有注册为现行骨干，也未声称历史算法可完整训练。
+4. **按指令暂不处理**：TensorRT/ONNX/旧`aot_ts_nvfuser`可选HMNet导出路径。第1项对现有Runtime的合成Add检查仅用于验证qonnx依赖修复，不涉及HMNet导出。
+5. **只提供链接，等待用户决定下载**：见[数据集与权重下载清单](04_数据集与权重下载清单.md)。本轮仅读取网页、发布资产清单及HTTP HEAD响应，未下载官方数据、元数据或模型权重。
+6. **按指令延后测试**：数据对齐、空监督集合、检测idx_offset、RGB固定通道、跨chunk状态等疑点，待数据与权重准备完毕后，在真实样本完整前后向、短训练、恢复训练及流式推理中复现和判断。本轮不做正式算法改造。
 
-本轮修改主要是环境/API兼容层；未实施EfficientViT、Gray融合或S-FIFO正式算法改造。
+## 7. 第1–3项补充修复记录
+
+### 7.1 共享环境的实际变化
+
+| 包/文件 | 修复前 | 修复后 |
+|---|---|---|
+| qonnx | 1.0.0，硬编码依赖`onnxruntime`包名 | 1.0.0+ortgpu，依赖`onnxruntime-gpu>=1.16.1` |
+| protobuf Python绑定 | 4.25.3，Conda旧C++绑定产生Python3.12弃用警告 | 5.29.5，PyPI二进制wheel，实际后端`upb` |
+| apex | 0.9.10.dev0，Pyramid Web工具包 | 卸载；没有安装NVIDIA Apex，timm原生实现可用 |
+| 无效nvitop残留 | `~vitop/`、`~vitop-1.3.2.dist-info/` | 已移出site-packages并保存备份 |
+| 其他包 | 原有版本 | 均保留，包括Torch2.5、CUDA12.1、NumPy1.26.4、timm1.0.15、onnx1.17.0、onnxruntime-gpu1.20.2、nvitop1.3.2 |
+
+[包差异](../artifacts/environment/followup/package-diff.txt)表明：修改2个包版本、移除1个错误包，未新增其他包；原生`libprotobuf 4.25.3`未更换。GPU Runtime的308个文件逐一校验SHA256，全部未变。
+
+**为什么没有直接安装CPU版onnxruntime：**环境已经有可导入的GPU版。官方要求[同一环境只安装一个Runtime发行包](https://onnxruntime.ai/docs/get-started/with-python.html)，否则两个包会写入同一个Python模块目录。qonnx上游[依赖声明](https://github.com/fastmachinelearning/qonnx/blob/main/setup.cfg)只认CPU发行包名，包名不匹配使pip报告缺依赖。
+
+因此提供[build_qonnx_gpu_wheel.py](../scripts/build_qonnx_gpu_wheel.py)：核验官方qonnx1.0.0 wheel的SHA256，改依赖包名和本地版本标识，重新生成合法wheel及RECORD，再通过pip安装。构建后逐文件验证100个qonnx代码/资源文件未改变。原包来源与哈希见[upstream](../artifacts/environment/followup/qonnx-upstream.txt)，构建见[build](../artifacts/environment/followup/qonnx-build.txt)。未来升级qonnx时需要重新检查上游是否支持GPU依赖，不能直接照搬此补丁到新版本。
+
+protobuf的Python3.12类型弃用问题在[上游issue](https://github.com/protocolbuffers/protobuf/issues/15077)有记录。本机临时目录实测4.25.8仍有同类警告，5.29.5通过严格导入和序列化检查后才安装。使用`--no-deps`，未联动更新Torch、原生libprotobuf或其他依赖。protobuf是共享Python依赖，此次检查覆盖下表所列消费者，其他工程仍应按其自身业务做回归。
+
+### 7.2 安装复现与备份
+
+本机已完成，无需重装。以下命令用于之后在**相同现有环境**重建此次修复，wheel不是数据集/权重：
+
+```bash
+mkdir -p /tmp/hmnet-env-followup
+./scripts/hmnet-python -m pip download --no-deps --only-binary=:all: --index-url https://pypi.org/simple -d /tmp/hmnet-env-followup qonnx==1.0.0 protobuf==5.29.5
+./scripts/hmnet-python scripts/build_qonnx_gpu_wheel.py /tmp/hmnet-env-followup/qonnx-1.0.0-py2.py3-none-any.whl /tmp/hmnet-env-followup
+./scripts/hmnet-python -m pip install --no-deps /tmp/hmnet-env-followup/qonnx-1.0.0+ortgpu-py2.py3-none-any.whl /tmp/hmnet-env-followup/protobuf-5.29.5-cp38-abi3-manylinux2014_x86_64.whl
+./scripts/hmnet-python -m pip check
+```
+
+安装报告：[install](../artifacts/environment/followup/install.txt)、[结构化报告](../artifacts/environment/followup/install-report.txt)。本机恢复材料保存在`.local/environment-backups/20260915-followup/`（Git忽略）：Web Apex原文件归档、原Conda protobuf文件归档、原始/修订qonnx wheel、protobuf新wheel、两份nvitop残留备份。
+
+如确需回退，先卸载修订qonnx/protobuf，再安装备份的原始qonnx wheel，将原protobuf归档按原相对路径恢复到该环境的site-packages；Apex归档也以site-packages为基准保存，包含原console entry point相对路径。回退会重新引入本次已解决的依赖声明/弃用问题。`~vitop`是无效残留，正常使用无需恢复。
+
+原[baseline约束](../requirements/pytorch-baseline-constraints.txt)仅作为首次维护前的历史快照。后续增量维护改用[当前约束](../requirements/pytorch-current-constraints.txt)，**以`-c`使用，不以`-r`安装全部包**。HMNet直接运行依赖仍在`requirements.txt`；qonnx属于共享环境维护，不新增为HMNet必需依赖。
+
+### 7.3 本次验证
+
+测试代码与`artifacts/environment/followup/`审计记录均保留在本机；当前工作区的`.gitignore`忽略`tests/`和`artifacts/`，已保留该设置，因此这些材料不会随普通Git提交自动进入仓库。
+
+| 验证 | 结果与范围 |
+|---|---|
+| pip check | [退出0，No broken requirements found](../artifacts/environment/followup/pip-check.txt)，无无效distribution警告 |
+| CPU严格回归 | [43 passed、1 skipped](../artifacts/environment/followup/compatibility-cpu.txt)；新增两份old导入；包括22份配置、三任务CPU构造和DataLoader两worker |
+| CUDA严格回归 | [1 passed](../artifacts/environment/followup/compatibility-cuda.txt)，选当时空闲GPU0；scatter及梯度、NMS、AMP |
+| 共享依赖 | [通过](../artifacts/environment/followup/shared-runtime-check.txt)：ORT CPU/QONNX合成Add、protobuf map序列化、TensorBoard/TensorBoardX日志写读、wandb导入 |
+| 语法与版本保护 | [124个Python文件compile通过](../artifacts/environment/followup/final-audit.txt)，含old，不含未改第三方toolbox；GPU Runtime 308个文件哈希一致 |
+| requirements | [dry-run通过](../artifacts/environment/followup/requirements-check.txt)，使用当前约束、无新增安装需求 |
+
+CPU/CUDA与共享依赖检查均将`DeprecationWarning`和`FutureWarning`作为错误处理，未使用忽略过滤器。可复查：
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 ./scripts/hmnet-python -B -m pytest tests/test_environment_compatibility.py -q -p no:cacheprovider -W error::DeprecationWarning -W error::FutureWarning
+```
+
+历史代码本次修复到“语法可编译、模块可导入”。旧文件中另外可见既有运行时缺口，例如`HMBackbone`调用`LatentTrans`时未传入必需的`output_dim`，更新层函数使用未传入的`num_heads`，以及`mvit`分支引用未定义的`MViTStage`。本次未扩展到历史算法恢复；不能用当前主模型测试替代旧模型构造/前向验证。现行22份配置仍选择`HMNet/HMNet1`。
