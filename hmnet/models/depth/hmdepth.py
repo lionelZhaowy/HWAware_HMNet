@@ -106,12 +106,6 @@ class HMDepth(BlockBase):
         s0 = torch.cuda.Stream(device=d0)
         timer = Timer(enabled=speed_test)
 
-        batch_size = len(list_events[0])
-        height = list_image_metas[0][0]['height']
-        width = list_image_metas[0][0]['width']
-
-        self.backbone.prepair_for_inference(batch_size, image_size=(height, width))
-
         for idx, (events, images, image_metas) in enumerate(zip(list_events, list_images, list_image_metas)):
             events = to_device(events, d0)
             images = to_device(images, d3)
@@ -119,6 +113,12 @@ class HMDepth(BlockBase):
             timer.lazy_start(43)
 
             events, images, image_metas = self._test_transform(events, images, image_metas)
+
+            if idx == 0:
+                # Image buffers must use the transformed size (e.g. MVSEC padding).
+                batch_size = len(events)
+                image_size = (image_metas[0]['height'], image_metas[0]['width'])
+                self.backbone.prepair_for_inference(batch_size, image_size=image_size)
 
             features = self.backbone.inference(events, image_metas, images)
 
@@ -201,7 +201,7 @@ class HMDepth(BlockBase):
         return gather_indices
 
     def _test_transform(self, events, images, img_metas):
-        if self.test_aug is not None:
+        if self.test_aug is None:
             return events, images, img_metas
 
         out_events, out_images, out_img_metas = [], [], []
@@ -217,7 +217,7 @@ class HMDepth(BlockBase):
         return out_events, out_images, out_img_metas
 
     def _backward_transform(self, preds, img_metas):
-        if self.test_aug is not None:
+        if self.test_aug is None:
             return preds, img_metas
 
         out_preds, out_img_metas = [], []

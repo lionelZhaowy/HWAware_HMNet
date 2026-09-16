@@ -320,7 +320,7 @@ class EventPacket(torch.utils.data.Dataset):
         nseg_per_packet = int(train_duration / 1000)
 
         if self.sampling == 'random':
-            ifile = random.randint(1, len(self.list_fpath_evt)-1)
+            ifile = random.randint(0, len(self.list_fpath_evt)-1)
             start_seg_index, end_seg_index = self.segment_ranges[ifile]
             seg_index = random.randint(start_seg_index, end_seg_index - nseg_per_packet)
         elif self.sampling in ('file', 'label', 'regular'):
