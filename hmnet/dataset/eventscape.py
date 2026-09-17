@@ -124,12 +124,14 @@ class EventPacket(torch.utils.data.Dataset):
                 fname_lbl = self.list_fpath_label[ifile]
                 seg_indices = np.unique(np.load(self._get_path(fname_lbl))['t'] // 1000).tolist()
                 self.sampling_timings += [ (ifile, seg_index) for seg_index in seg_indices ]
+            self.total_seq = len(self.sampling_timings)
         elif sampling == 'regular':
             self.sampling_timings = []
             sampling_stride = sampling_stride if sampling_stride > 0 else train_duration
             seg_stride = int(sampling_stride // 1000)
             for ifile, (start, end) in enumerate(self.segment_ranges):
                 self.sampling_timings += [ (ifile, seg_index) for seg_index in range(start,end,seg_stride) ]
+            self.total_seq = len(self.sampling_timings)
         elif sampling == 'random':
             self.total_seq = 0
             sampling_stride = sampling_stride if sampling_stride > 0 else train_duration

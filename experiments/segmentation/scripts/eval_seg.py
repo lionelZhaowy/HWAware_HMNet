@@ -115,7 +115,10 @@ def eval_seg(dpath_pred, dpath_gt, evalid_to_gtid, ignore_gtid, margin, dpath_ou
             pred = pred[st_y:st_y+hg, st_x:st_x+wg]
             hp, wp = pred.shape
 
-        ignore_mask = np.zeros_like(gt)
+        # Labels may be uint8; a signed dtype can represent the ignore value.
+        pred = pred.astype(np.int64, copy=False)
+        gt = gt.astype(np.int64, copy=False)
+        ignore_mask = np.zeros(gt.shape, dtype=bool)
         for ign in ignore_gtid:
             ignore_mask = np.logical_or(ignore_mask, gt == ign)
 
