@@ -20,9 +20,11 @@ class TrainSettings:
     warmup_start_factor = 0.1
     min_learning_rate = 2e-6
     eval_every_epochs = 1
-    eval_batch_size = 8
+    eval_batch_size = 32
     weight_decay = 0.01
-    workers = 2
+    workers = 16
+    # One prefetched batch per worker limits memory across three experiments.
+    prefetch_factor = 1
     output = str(ROOT / "logs/segmentation/efficientvit_b1")
     cache = (
         "/home/zhaowenyao24/Conda_prj/lab_dataset/DSEC_Semantic/preprocessed/dsec_b1"
@@ -48,7 +50,7 @@ class TrainSettings:
 
 class TestSettings(TrainSettings):
     frame_evaluation = True
-    batch_size = 2  # Evaluation does not need to use the training batch size.
+    batch_size = TrainSettings.eval_batch_size
 
     def get_model(self, devices=None, mode="single_process"):
         if mode != "single_process":
