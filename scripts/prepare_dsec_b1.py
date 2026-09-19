@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a bounded, independent RGB/DVS frame cache from official DSEC sources."""
+"""Build an independent RGB/DVS frame cache from official DSEC sources."""
 import argparse
 import hashlib
 import io
@@ -24,11 +24,15 @@ class HTTPRangeFile(io.RawIOBase):
 
     def __init__(self, url):
         self.url, self.pos = url, 0
-        with urllib.request.urlopen(urllib.request.Request(url, method="HEAD"), timeout=60) as r:
+        with urllib.request.urlopen(
+            urllib.request.Request(url, method="HEAD"), timeout=60
+        ) as r:
             self.size = int(r.headers["Content-Length"])
 
     def seek(self, offset, whence=0):
-        self.pos = offset if whence == 0 else (self.pos if whence == 1 else self.size) + offset
+        self.pos = (
+            offset if whence == 0 else (self.pos if whence == 1 else self.size) + offset
+        )
         return self.pos
 
     def tell(self):
@@ -46,7 +50,9 @@ class HTTPRangeFile(io.RawIOBase):
             try:
                 with urllib.request.urlopen(req, timeout=40) as r:
                     if r.status != 206:
-                        raise RuntimeError(f"Server did not honor HTTP Range: {self.url}")
+                        raise RuntimeError(
+                            f"Server did not honor HTTP Range: {self.url}"
+                        )
                     data = r.read(size)
                 if len(data) != size:
                     raise IOError("Incomplete HTTP range response")
@@ -59,11 +65,11 @@ class HTTPRangeFile(io.RawIOBase):
         return data
 
 
-def ensure_assets(sequence, root, download=False):
+def ensure_assets(sequence, root, download=False, split="train"):
     directory = root / sequence
     calibration = directory / "calibration/cam_to_cam.yaml"
     rectify = directory / "events/left/rectify_map.h5"
-    base = f"https://download.ifi.uzh.ch/rpg/DSEC/train/{sequence}/{sequence}"
+    base = f"https://download.ifi.uzh.ch/rpg/DSEC/{split}/{sequence}/{sequence}"
     if not calibration.exists() and download:
         with urllib.request.urlopen(base + "_calibration.zip", timeout=60) as r:
             archive = zipfile.ZipFile(io.BytesIO(r.read()))
@@ -98,7 +104,9 @@ def read_window(handle, target, duration=50000):
     hi_ms = end // 1000 + 1
     hi = int(index[hi_ms]) if 0 <= hi_ms < len(index) else len(handle["events/t"])
     ts = handle["events/t"][lo:hi].astype(np.int64)
-    a, b = np.searchsorted(ts, start, side="left"), np.searchsorted(ts, end, side="right")
+    a, b = np.searchsorted(ts, start, side="left"), np.searchsorted(
+        ts, end, side="right"
+    )
     lo, hi = lo + int(a), lo + int(b)
     return np.stack(
         [handle["events/" + key][lo:hi] for key in ("t", "x", "y", "p")], axis=1
@@ -121,14 +129,21 @@ def validate_rectify(calibration, mapping):
         conf_to_K(intr["camRect0"]["camera_matrix"]),
         (cv2.TERM_CRITERIA_MAX_ITER | cv2.TERM_CRITERIA_EPS, 100, 0.001),
     ).reshape(h, w, 2)
-    if not np.isfinite(mapping).all() or not np.allclose(expected, mapping, rtol=0, atol=0.01):
+    if not np.isfinite(mapping).all() or not np.allclose(
+        expected, mapping, rtol=0, atol=0.01
+    ):
         raise ValueError("rectify_map is incompatible with the supplied calibration")
 
 
 def prepare(args):
     torch.set_num_threads(2)
     source = Path(args.source).resolve()
-    out = Path(args.output) if args.output else source.parent / "preprocessed/dsec_b1"
+    cache_name = "dsec_b1" if args.split == "train" else "dsec_b1_test"
+    out = (
+        Path(args.output)
+        if args.output
+        else source.parent / "preprocessed" / cache_name
+    )
     assets = Path(args.assets) if args.assets else out / "assets"
     if (out / "manifest.json").exists():
         raise FileExistsError(
@@ -139,11 +154,13 @@ def prepare(args):
     out.mkdir(parents=True, exist_ok=True)
     representation = RVTHistogram()
     entries, counts, provenance = [], {}, {}
-    for labels in sorted((source / "train").glob("*/11classes")):
+    for labels in sorted((source / args.split).glob("*/11classes")):
         seq = labels.parent.name
         if args.sequences and seq not in args.sequences:
             continue
-        calibration, rectify = ensure_assets(seq, assets, args.download_assets)
+        calibration, rectify = ensure_assets(
+            seq, assets, args.download_assets, args.split
+        )
         conf = yaml.safe_load(calibration.read_text())
         with h5py.File(rectify) as f:
             rectify_values = f["rectify_map"][...]
@@ -152,9 +169,12 @@ def prepare(args):
         if mapping.shape != (480, 640, 2) or not np.isfinite(mapping).all():
             raise ValueError(f"{seq}: incompatible event remapping shape/values")
         provenance[seq] = {
-            p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in (calibration, rectify)
+            p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in (calibration, rectify)
         }
-        timestamps = np.loadtxt(labels.parent / f"{seq}_semantic_timestamps.txt", dtype=np.int64)
+        timestamps = np.loadtxt(
+            labels.parent / f"{seq}_semantic_timestamps.txt", dtype=np.int64
+        )
         paths = sorted(labels.glob("*.png"))
         if len(paths) != len(timestamps):
             raise ValueError(f"{seq}: label timestamp count mismatch")
@@ -168,7 +188,12 @@ def prepare(args):
             min(args.per_sequence, len(paths)) if args.per_sequence else len(paths),
             dtype=int,
         )
-        counts[seq] = {"selected": len(selected), "no_past_rgb": 0, "all_ignore": 0, "saved": 0}
+        counts[seq] = {
+            "selected": len(selected),
+            "no_past_rgb": 0,
+            "all_ignore": 0,
+            "saved": 0,
+        }
         with h5py.File(source / seq / "events/left/events.h5") as handle:
             for idx in selected:
                 target = int(timestamps[idx])
@@ -177,7 +202,10 @@ def prepare(args):
                     counts[seq]["no_past_rgb"] += 1
                     continue
                 label = cv2.imread(str(paths[idx]), cv2.IMREAD_UNCHANGED)
-                if label.shape != (440, 640) or not np.isin(label, list(range(11)) + [255]).all():
+                if (
+                    label.shape != (440, 640)
+                    or not np.isin(label, list(range(11)) + [255]).all()
+                ):
                     raise ValueError(f"Unexpected label shape/classes: {paths[idx]}")
                 if np.all(label == 255):
                     counts[seq]["all_ignore"] += 1
@@ -190,15 +218,22 @@ def prepare(args):
                     )
                 # Output grid is RAW event-left coordinates; sampling grid points
                 # into the RECTIFIED RGB-left input. Crop only AFTER remapping.
-                rgb = cv2.remap(rgb, mapping, None, cv2.INTER_CUBIC)[:440, :, ::-1].copy()
+                rgb = cv2.remap(rgb, mapping, None, cv2.INTER_CUBIC)[
+                    :440, :, ::-1
+                ].copy()
                 events = read_window(handle, target)
                 events = events[events[:, 2] < 440]
-                hist, _ = representation(torch.from_numpy(events), dict(height=440, width=640))
+                hist, _ = representation(
+                    torch.from_numpy(events), dict(height=440, width=640)
+                )
                 relative = f"{seq}/{idx:06d}.npz"
                 destination = out / relative
                 destination.parent.mkdir(exist_ok=True)
                 np.savez_compressed(
-                    destination, histogram=hist.numpy().astype(np.uint8), rgb=rgb, label=label
+                    destination,
+                    histogram=hist.numpy().astype(np.uint8),
+                    rgb=rgb,
+                    label=label,
                 )
                 entry = dict(
                     file=relative,
@@ -208,20 +243,30 @@ def prepare(args):
                     rgb_age_us=target - int(rgb_ts[ri]),
                     label_path=str(paths[idx]),
                     rgb_path=str(rgb_paths[ri]),
-                    split="dev" if seq == "zurich_city_08_a" else "train",
+                    split=(
+                        "test"
+                        if args.split == "test"
+                        else "dev" if seq == "zurich_city_08_a" else "train"
+                    ),
                 )
                 entries.append(entry)
                 counts[seq]["saved"] += 1
                 if counts[seq]["saved"] == 1:
                     active = hist.sum(0).numpy() > 0
                     overlay = rgb.copy()
-                    overlay[active] = (0.5 * overlay[active] + np.array([127, 0, 127])).astype(
-                        np.uint8
+                    overlay[active] = (
+                        0.5 * overlay[active] + np.array([127, 0, 127])
+                    ).astype(np.uint8)
+                    palette = np.random.default_rng(42).integers(
+                        0, 255, (256, 3), dtype=np.uint8
                     )
-                    palette = np.random.default_rng(42).integers(0, 255, (256, 3), dtype=np.uint8)
                     palette[255] = 0
                     panel = np.concatenate(
-                        [rgb, overlay, ((rgb.astype(float) + palette[label]) / 2).astype(np.uint8)],
+                        [
+                            rgb,
+                            overlay,
+                            ((rgb.astype(float) + palette[label]) / 2).astype(np.uint8),
+                        ],
                         axis=1,
                     )
                     cv2.imwrite(str(out / f"{seq}_overlay.png"), panel[:, :, ::-1])
@@ -233,7 +278,8 @@ def prepare(args):
         count_cutoff=10,
         fastmode=True,
         crop=[0, 0, 440, 640],
-        holdout="zurich_city_08_a",
+        source_split=args.split,
+        holdout="zurich_city_08_a" if args.split == "train" else None,
         max_rgb_age_us=args.max_rgb_age,
         assets=provenance,
         counts=counts,
@@ -249,10 +295,16 @@ if __name__ == "__main__":
         required=True,
         help="DSEC source directory containing train/ and per-sequence raw data",
     )
-    p.add_argument("--output", help="Shared cache; default: source/../preprocessed/dsec_b1")
+    p.add_argument("--split", choices=("train", "test"), default="train")
+    p.add_argument(
+        "--output", help="Shared cache; default: source/../preprocessed/dsec_b1[_test]"
+    )
     p.add_argument("--assets")
     p.add_argument(
-        "--per-sequence", type=int, default=0, help="0: all labels; N: at most N per sequence"
+        "--per-sequence",
+        type=int,
+        default=0,
+        help="0: all labels; N: at most N per sequence",
     )
     p.add_argument("--max-rgb-age", type=int, default=50000)
     p.add_argument("--sequences", nargs="+")

@@ -106,6 +106,43 @@ CUDA_VISIBLE_DEVICES=1 ./scripts/hmnet-python experiments/segmentation/scripts/t
 
 可用 `--pretrained 路径` 显式选择任务权重；覆盖划分/缓存时使用 `test.py 配置 train或dev 共享缓存目录`。直接输出mIoU、各类IoU和混淆矩阵至实验目录 `evaluation_dev.json`，无需运行旧 `run_eval.sh`，不传 `--fast`。训练第1步、每50步及最后一步也自动验证；总损失含主/辅助CE系数1.0/0.4，TensorBoard分项为头部提供的未加权CE。
 
+
+### 官方测试集与单序列演示
+
+2026-09-19：`full_100ep` 已按要求停止，使用step=8500检查点完成评估。官方test 2809帧mIoU为59.49%，本机HMNet-B3纯事件基线为53.97%；输入模态不同。完整[评估报告](../../logs/segmentation/efficientvit_b1/full_100ep/assessment/评估与能力分析.md)与[视频页面](../../logs/segmentation/efficientvit_b1/full_100ep/assessment/index.html)保存在实验logs目录。
+
+训练缓存中的 `dev` 是留出的训练序列，不是官方测试集。需要与 HMNet 测试精度比较时，单独准备测试缓存（仅一次）：
+
+```bash
+./scripts/hmnet-python scripts/prepare_dsec_b1.py \
+  --source /home/zhaowenyao24/Conda_prj/lab_dataset/DSEC_Semantic/source \
+  --split test \
+  --assets /home/zhaowenyao24/Conda_prj/lab_dataset/DSEC_Semantic/preprocessed/dsec_b1_assets \
+  --download-assets
+```
+
+默认写入共享 `preprocessed/dsec_b1_test`，不会混入训练缓存。完整指标可用原 test 入口：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/test.py \
+  experiments/segmentation/config/efficientvit_b1.py test \
+  /home/zhaowenyao24/Conda_prj/lab_dataset/DSEC_Semantic/preprocessed/dsec_b1_test \
+  --output logs/segmentation/efficientvit_b1/full_100ep
+```
+
+同时导出逐序列指标、预测和演示视频：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python scripts/evaluate_dsec_b1.py \
+  --checkpoint logs/segmentation/efficientvit_b1/full_100ep/checkpoint.pth \
+  --cache /home/zhaowenyao24/Conda_prj/lab_dataset/DSEC_Semantic/preprocessed/dsec_b1_test \
+  --output logs/segmentation/efficientvit_b1/full_100ep/assessment \
+  --demo-sequence zurich_city_13_a \
+  --hmnet-dir artifacts/full-eval/seg
+```
+
+`--hmnet-dir` 可省略；本机该目录是历史 HMNet-B3 纯事件官方权重预测，不是新产物目录。新增产物均位于当前实验 `assessment/`：`assessment.json`、`sequence_demo.mp4`、示例截图、逐帧预测和指标。视频使用环境中的 ffmpeg/libx264。比较按同一语义帧索引及11类标签进行；HMNet预热缺失帧同时报告“缺失计错”和“共同有预测帧”两个口径。RGB+DVS与纯事件的输入信息不同，不能据此单独归因骨干优劣。
+
 ---
 
 # 原 HMNet 使用说明

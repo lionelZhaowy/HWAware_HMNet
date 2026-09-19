@@ -42,7 +42,9 @@ def unpack(batch, task):
 def evaluate_seg(model, dataset, batch_size=2):
     model.eval()
     confusion = torch.zeros(11, 11, dtype=torch.int64)
-    for batch in DataLoader(dataset, batch_size=batch_size, collate_fn=collate_keep_dict):
+    for batch in DataLoader(
+        dataset, batch_size=batch_size, collate_fn=collate_keep_dict
+    ):
         events, images, metas, labels = unpack(batch, "segmentation")
         pred, _ = model.inference(events, images, metas)
         pred = pred.argmax(1).cpu()
@@ -94,7 +96,11 @@ def configure_frame_training(config, args):
         if value is not None:
             setattr(config, name, value)
     if args.data_root is not None:
-        setattr(config, "cache" if config.task == "segmentation" else "data_root", args.data_root)
+        setattr(
+            config,
+            "cache" if config.task == "segmentation" else "data_root",
+            args.data_root,
+        )
 
 
 def resolve_training_updates(config, batches_per_epoch):
@@ -117,7 +123,9 @@ def resolve_training_updates(config, batches_per_epoch):
 
 def run(config, args):
     if args.distributed:
-        raise ValueError("First-version frame training is single GPU; run with --single")
+        raise ValueError(
+            "First-version frame training is single GPU; run with --single"
+        )
     fix_seed(args.seed)
     torch.set_num_threads(4)
     output = Path(config.output)
@@ -182,14 +190,22 @@ def run(config, args):
             "Increase total --epochs/--updates to continue, or run test.py."
         )
     validation = (
-        config.get_validation_dataset() if hasattr(config, "get_validation_dataset") else None
+        config.get_validation_dataset()
+        if hasattr(config, "get_validation_dataset")
+        else None
     )
     history = output / "metrics.jsonl"
     if config.resume and history.exists():
         # A crash can leave metrics newer than the last saved optimizer update.
         # Keep JSON history aligned with TensorBoard's purge_step on continuation.
-        rows = [json.loads(line) for line in history.read_text().splitlines() if line.strip()]
-        history.write_text("".join(json.dumps(row) + "\n" for row in rows if row["step"] <= step))
+        rows = [
+            json.loads(line)
+            for line in history.read_text().splitlines()
+            if line.strip()
+        ]
+        history.write_text(
+            "".join(json.dumps(row) + "\n" for row in rows if row["step"] <= step)
+        )
     elif not config.resume:
         history.write_text("")
         if tensorboard_dir.exists():
@@ -209,7 +225,9 @@ def run(config, args):
                 lr=config.learning_rate,
                 weight_decay=config.weight_decay,
                 amp=args.amp,
-                data_root=str(getattr(config, "cache", getattr(config, "data_root", ""))),
+                data_root=str(
+                    getattr(config, "cache", getattr(config, "data_root", ""))
+                ),
                 train_samples=len(dataset),
                 dev_samples=len(validation) if validation else 0,
                 tensorboard_dir=str(tensorboard_dir),
@@ -235,7 +253,9 @@ def run(config, args):
     # Use optimizer updates as the x-axis, not microbatches. Purging after resume
     # hides stale points beyond the checkpoint; context exit flushes on exceptions.
     with SummaryWriter(
-        str(tensorboard_dir), purge_step=step + 1 if config.resume else None, flush_secs=30
+        str(tensorboard_dir),
+        purge_step=step + 1 if config.resume else None,
+        flush_secs=30,
     ) as writer:
         while step < max_updates:
             model.train()
@@ -264,7 +284,10 @@ def run(config, args):
                 samples += result["num_samples"]
                 accepted += 1
             scaler.unscale_(optimizer)
-            if not all(p.grad is None or torch.isfinite(p.grad).all() for p in model.parameters()):
+            if not all(
+                p.grad is None or torch.isfinite(p.grad).all()
+                for p in model.parameters()
+            ):
                 if args.amp:
                     scaler.step(optimizer)
                     scaler.update()
@@ -285,16 +308,22 @@ def run(config, args):
                 seconds=seconds,
                 lr=optimizer.param_groups[0]["lr"],
                 learning_rates=[group["lr"] for group in optimizer.param_groups],
-                loss_components={name: value / accepted for name, value in component_sums.items()},
+                loss_components={
+                    name: value / accepted for name, value in component_sums.items()
+                },
                 amp_scale=scaler.get_scale(),
                 amp_skipped_updates=amp_skipped_updates,
                 samples_per_second=samples / seconds,
                 peak_memory_mib=torch.cuda.max_memory_allocated() / 2**20,
             )
-            if validation is not None and (step == 1 or step % 50 == 0 or step == max_updates):
+            if validation is not None and (
+                step == 1 or step % 50 == 0 or step == max_updates
+            ):
                 record["dev"] = evaluate_seg(model, validation, config.batch_size)
                 if getattr(config, "overfit", 0):
-                    record["fixed_train"] = evaluate_seg(model, dataset, config.batch_size)
+                    record["fixed_train"] = evaluate_seg(
+                        model, dataset, config.batch_size
+                    )
             with history.open("a") as f:
                 f.write(json.dumps(record) + "\n")
             write_tensorboard(writer, record)
@@ -320,19 +349,26 @@ def run(config, args):
 
 
 def run_seg_evaluation(config, args):
-    """Existing segmentation test CLI: data_list=train/dev, data_root=frame cache."""
+    """Existing segmentation test CLI: data_list=train/dev/test, data_root=frame cache."""
     from hmnet.dataset.dsec_frames import DSECFrames
 
-    if args.mode != "single_process" or args.fast or args.fuse_right or args.test_chunks != "1/1":
+    if (
+        args.mode != "single_process"
+        or args.fast
+        or args.fuse_right
+        or args.test_chunks != "1/1"
+    ):
         raise ValueError(
-            "Frame cache evaluation requires single_process, left RGB and a complete train/dev split"
+            "Frame cache evaluation requires single_process, left RGB and a complete train/dev/test split"
         )
     if getattr(args, "output", None):
         config.output = args.output
     args.data_list = args.data_list or "dev"
     args.data_root = args.data_root or config.cache
-    if args.data_list not in ("train", "dev"):
-        raise ValueError("For the B1 frame configuration, data_list must be train or dev")
+    if args.data_list not in ("train", "dev", "test"):
+        raise ValueError(
+            "For the B1 frame configuration, data_list must be train, dev or test"
+        )
     device = torch.device("cpu" if args.cpu else f"cuda:{int(args.gpuid)}")
     torch.set_num_threads(2)
     model = config.get_model().to(device)
@@ -345,5 +381,7 @@ def run_seg_evaluation(config, args):
         metrics = evaluate_seg(model, dataset, config.batch_size)
     out = Path(config.output)
     out.mkdir(parents=True, exist_ok=True)
-    (out / f"evaluation_{args.data_list}.json").write_text(json.dumps(metrics, indent=2))
+    (out / f"evaluation_{args.data_list}.json").write_text(
+        json.dumps(metrics, indent=2)
+    )
     print(json.dumps(metrics), flush=True)
