@@ -40,11 +40,16 @@ def unpack(batch, task):
 
 
 @torch.no_grad()
-def evaluate_seg(model, dataset, batch_size=2):
+def evaluate_seg(model, dataset, batch_size=2, workers=0, prefetch_factor=1):
     model.eval()
     confusion = torch.zeros(11, 11, dtype=torch.int64)
     for batch in DataLoader(
-        dataset, batch_size=batch_size, collate_fn=collate_keep_dict
+        dataset,
+        batch_size=batch_size,
+        collate_fn=collate_keep_dict,
+        num_workers=workers,
+        pin_memory=True,
+        **({"prefetch_factor": prefetch_factor} if workers > 0 else {}),
     ):
         events, images, metas, labels = unpack(batch, "segmentation")
         pred, _ = model.inference(events, images, metas)
@@ -190,6 +195,12 @@ def run(config, args):
         batch_size=config.batch_size,
         shuffle=True,
         num_workers=config.workers,
+        # Bound host memory when several modality experiments run together.
+        **(
+            {"prefetch_factor": getattr(config, "prefetch_factor", 1)}
+            if config.workers > 0
+            else {}
+        ),
         generator=generator,
         collate_fn=collate_keep_dict,
         pin_memory=True,
@@ -408,6 +419,8 @@ def run(config, args):
                     model,
                     validation,
                     getattr(config, "eval_batch_size", config.batch_size),
+                    workers=getattr(config, "workers", 0),
+                    prefetch_factor=getattr(config, "prefetch_factor", 1),
                 )
                 is_best = record["dev"]["miou"] > best_miou
                 if is_best:
@@ -415,7 +428,11 @@ def run(config, args):
                 record.update(best_miou=best_miou, best_step=best_step)
                 if getattr(config, "overfit", 0):
                     record["fixed_train"] = evaluate_seg(
-                        model, dataset, config.batch_size
+                        model,
+                        dataset,
+                        config.batch_size,
+                        workers=getattr(config, "workers", 0),
+                        prefetch_factor=getattr(config, "prefetch_factor", 1),
                     )
             with history.open("a") as f:
                 f.write(json.dumps(record) + "\n")
@@ -479,7 +496,13 @@ def run_seg_evaluation(config, args):
         model.load_state_dict(state.get("state_dict", state), strict=True)
     dataset = DSECFrames(args.data_root, args.data_list)
     with torch.amp.autocast(device.type, enabled=args.fp16):
-        metrics = evaluate_seg(model, dataset, config.batch_size)
+        metrics = evaluate_seg(
+            model,
+            dataset,
+            config.batch_size,
+            workers=getattr(config, "workers", 0),
+            prefetch_factor=getattr(config, "prefetch_factor", 1),
+        )
     out = Path(config.output)
     out.mkdir(parents=True, exist_ok=True)
     (out / f"evaluation_{args.data_list}.json").write_text(

@@ -61,9 +61,10 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/t
 | `warmup_start_factor` | 0.1，首次更新lr=`2e-5`，预热末尾到`2e-4`。 |
 | `min_learning_rate` | `2e-6`，300轮最后一次更新时到达。 |
 | `weight_decay` | 0.01。 |
-| `workers` | 2个数据加载进程。 |
+| `workers` | 16个数据加载进程，训练和验证共用。 |
+| `prefetch_factor` | 1；每个worker预取一批，限制三实验并行时的主机内存。 |
 | `eval_every_epochs` | 1；每轮验证，另在第1次更新和结束时验证。 |
-| `eval_batch_size` | 8；控制训练中验证的显存，不影响训练batch。 |
+| `eval_batch_size` | 32；控制训练中验证的显存，不影响训练batch。 |
 | `overfit` | 0表示全训练集；正整数限制前N个样本并禁用翻转，仅供调试。 |
 | `pretrained` | 官方ImageNet初始化路径，不是任务resume检查点。 |
 | `resume` | 默认空；新三组必须从头初始化。 |
@@ -113,7 +114,7 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/t
   --pretrained logs/segmentation/efficientvit_b1/best_checkpoint.pth
 ```
 
-结果为实验目录的 `evaluation_dev.json` / `evaluation_test.json`。不指定 `--pretrained` 时仍读取最新 `checkpoint.pth`；测试 `TestSettings.batch_size=2`。三种模态均使用同一指标实现。
+结果为实验目录的 `evaluation_dev.json` / `evaluation_test.json`。不指定 `--pretrained` 时仍读取最新 `checkpoint.pth`；测试 `TestSettings.batch_size=32`。三种模态均使用同一指标实现。
 
 ---
 
@@ -224,3 +225,5 @@ The pre-trained weights are released under the Creative Commons BY-SA 4.0 Licens
 | hmnet_L1 | A100 (40GB) x 16 | 42.5 | 0.1881 | [github](https://github.com/hamarh/HMNet_pth/releases/download/v0.2.0/dsec_hmnet_L1.pth) | [github](https://github.com/hamarh/HMNet_pth/releases/download/v0.1.0/dsec_hmnet_L1.csv) |
 | hmnet_B3 | A100 (40GB) x 16 | 46.0 | 0.1685 | [github](https://github.com/hamarh/HMNet_pth/releases/download/v0.2.0/dsec_hmnet_B3.pth) | [github](https://github.com/hamarh/HMNet_pth/releases/download/v0.1.0/dsec_hmnet_B3.csv) |
 | hmnet_L3 | A100 (40GB) x 16 | 63.1 | 0.1410 | [github](https://github.com/hamarh/HMNet_pth/releases/download/v0.2.0/dsec_hmnet_L3.pth) | [github](https://github.com/hamarh/HMNet_pth/releases/download/v0.1.0/dsec_hmnet_L3.csv) |
+
+数据加载优化：三工程统一 workers=16、prefetch_factor=1、训练/验证 batch=32。验证保持 FP32；更改 worker 和验证 batch 后需重启或从 checkpoint 恢复，运行中的进程不会自动加载新配置。训练 batch、梯度累积和学习率曲线保持原值。

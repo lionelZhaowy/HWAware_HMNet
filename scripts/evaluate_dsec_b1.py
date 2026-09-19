@@ -158,7 +158,12 @@ def main(args):
     del ckpt
     ds = DSECFrames(args.cache, args.split)
     loader = DataLoader(
-        ds, batch_size=args.batch_size, num_workers=2, collate_fn=collate_keep_dict
+        ds,
+        batch_size=args.batch_size or cfg.batch_size,
+        num_workers=cfg.workers,
+        collate_fn=collate_keep_dict,
+        pin_memory=True,
+        **({"prefetch_factor": getattr(cfg, "prefetch_factor", 1)} if cfg.workers > 0 else {}),
     )
     seqs = sorted({s["sequence"] for s in ds.samples})
     counts = {s: sum(r["sequence"] == s for r in ds.samples) for s in seqs}
@@ -352,5 +357,5 @@ if __name__ == "__main__":
         help="Optional HMNet arrays indexed by original semantic-frame index",
     )
     p.add_argument("--demo-sequence", default="zurich_city_13_a")
-    p.add_argument("--batch-size", type=int, default=4)
+    p.add_argument("--batch-size", type=int, default=None, help="Default: TestSettings.batch_size")
     main(p.parse_args())
