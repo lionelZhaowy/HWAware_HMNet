@@ -78,7 +78,7 @@ def color(labels):
     return result
 
 
-def panel(rgb, hist, gt, pred, baseline, title):
+def panel(rgb, hist, gt, pred, baseline, title, model_label="EfficientViT-B1 RGB+DVS"):
     # Histogram channel order is [negative bins, positive bins].
     events = np.zeros_like(rgb)
     events[..., 0] = np.minimum(hist[10:].sum(0) * 32, 255).astype(np.uint8)
@@ -91,7 +91,7 @@ def panel(rgb, hist, gt, pred, baseline, title):
         (rgb, "Registered RGB"),
         (events, "DVS: red positive / blue negative"),
         (color(gt), "Ground truth"),
-        (color(pred), "EfficientViT-B1 RGB+DVS"),
+        (color(pred), model_label),
         (color(baseline), "HMNet-B3 events (official weights)"),
         (error, "B1 error: red wrong / green correct"),
     ]
@@ -278,6 +278,7 @@ def main(args):
                             pred,
                             base,
                             f"{seq} | frame {original_index} | t={(sample['target_us']-demo[0]['target_us'])/1e6:.2f}s | checkpoint {checkpoint_step}",
+                            model_label=f"EfficientViT-B1 {cfg.modality.upper()}",
                         )
                     video.stdin.write(frame.tobytes())
                     if idx in {
@@ -305,6 +306,7 @@ def main(args):
         cache=str(Path(args.cache).resolve()),
         classes=NAMES,
         precision="FP32",
+        modality=cfg.modality,
         parameters=sum(p.numel() for p in model.parameters()),
         evaluated=metrics(sum(cs.values())),
         sequences={s: dict(frames=counts[s], **metrics(cs[s])) for s in seqs},
