@@ -2,12 +2,114 @@
 
 配置 [efficientvit_b1.py](config/efficientvit_b1.py)：50ms RVT Histogram → DVS单分支官方B1 → 四尺度Pyramid → 原深度头。Eventscape和MVSEC独立实例化及训练。以下均从仓库根目录运行。
 
+## 0. 当前实现、验证范围与后续路线
+
+当前 B1 基线使用 **50 ms / 10 bins / 20 通道 RVT Histogram → 官方 EfficientViT-B1 → 四尺度 Pyramid → 各任务头**。它是无循环状态模型；尚未加入 HWAware B1、S-FIFO、自回归或 RENet/FRN 等复杂融合。目录名称含 HWAware 不代表当前骨干已经替换为硬件版本。
+
+三任务复用同一骨干实现，分别实例化、训练和保存权重，**不是共享参数的多任务联合训练**。当前分割支持 RGB-only、DVS-only、RGB+DVS；融合为双独立分支四尺度投影相加。检测及 Eventscape/MVSEC 深度当前使用 DVS-only，尚未接入 RGB 融合实验。
+
+| 任务 | 数据表示如何得到 | 当前验证范围 |
+|---|---|---|
+| DSEC 分割 | 离线共享缓存：Histogram、配准 RGB、标签及有效样本索引 | 已有真实数据冒烟、短训和训练/评估；正在开展三模态对照。保留当前缓存方案。 |
+| GEN1 检测 | 必须先转换事件/标注并生成时间索引；Histogram 在 CPU DataLoader worker 在线构建 | 已接入任务头并做真实样本冒烟；未完成正式全量收敛实验。 |
+| Eventscape / MVSEC 深度 | 必须先整理文件和生成时间索引；Histogram 在 CPU DataLoader worker 在线构建 | 已接入任务头并做真实样本冒烟；未完成正式全量收敛实验。 |
+
+**在线 Histogram 不等于 GPU 预处理，也不等于下载后即可训练。** 一次性格式转换/索引与逐窗口稠密缓存是不同步骤；共享准备结果可被多个工程复用，不需要每个工程重新生成。
+
+后续先在分割上验证事件表示、骨干、融合和时序自回归的方案，再将确认的公共结构迁移到检测/深度，适配任务头与数据协议并重新验证。下方命令服务于当前 B1 基线，不代表这些后续模块已实现或检测/深度已完成正式实验。分割三模态实验的训练设置应一致；不同任务目前的超参数并不相同，检测/深度默认值是待验证的基线设置。
+
 ## 1. 数据集准备（共享目录）
 
-- Eventscape：`/data/lab_dataset/RGB_DVS_Fusion/Eventscape/preprocessed/hmnet/`，包含原HMNet的事件NPY、图像/深度索引、`list/<split>/{events.txt,images.txt,labels.txt,meta.pkl,video_duration.csv}`。将配置 `data_root` 指向此目录。
-- MVSEC：`/data/lab_dataset/RGB_DVS_Fusion/MVSEC/preprocessed/hmnet/`，包含 `outdoor_day2_data.hdf5`、`outdoor_day2_gt.hdf5`、`outdoor_day2_meta.npy` 和day1/night1测试对应文件。大型原始HDF5可使用指向共享source的链接，生成的meta放在preprocessed内。
+**必须做一次性离线准备；不需要生成逐窗口 Histogram 缓存。** Eventscape 需要合并事件并建立图像/深度索引；MVSEC 可保留原 HDF5，但必须配备毫秒级事件索引。以下命令均从仓库根目录开始，输出放在数据集共享目录，多个训练工程复用。
 
-具体预处理沿用下文原脚本，输出布局放在共享目录。已有结果可复用，通过配置或 `--data-root` 指向实际路径；本轮未移动/重新转换这两套数据。Histogram在线构建。首版不加载RGB，但Eventscape仍使用原图像索引接口。
+### 1.1 Eventscape
+
+先解压数据，要求 `/data/lab_dataset/RGB_DVS_Fusion/Eventscape/source/Town*/sequence_*/` 下包含 `events/data`、`rgb/data`、`depth/data` 及其时间戳文件。Town01/02/03 用于训练，Town05 按脚本中的固定 `VAL_IDS` 划分 val/test，不能混用。
+
+首次准备运行以下命令。已有完整预处理结果直接复用；不要对训练正在使用的输出目录重复转换。子 shell 结束后返回仓库根目录。
+
+```bash
+(
+  set -e
+  HMNET_REPO="$PWD"
+  EVENTSCAPE_SOURCE=/data/lab_dataset/RGB_DVS_Fusion/Eventscape/source
+  EVENTSCAPE_PREP=/data/lab_dataset/RGB_DVS_Fusion/Eventscape/preprocessed/hmnet
+  test -d "$EVENTSCAPE_SOURCE/Town01"
+  test -d "$EVENTSCAPE_SOURCE/Town05"
+  mkdir -p "$EVENTSCAPE_PREP"
+  cd "$EVENTSCAPE_PREP"
+  ln -sT "$EVENTSCAPE_SOURCE" source
+  EVENTSCAPE_SCRIPTS="$HMNET_REPO/experiments/depth/data/eventscape/scripts"
+  "$HMNET_REPO/scripts/hmnet-python" "$EVENTSCAPE_SCRIPTS/make_depth_info.py"
+  "$HMNET_REPO/scripts/hmnet-python" "$EVENTSCAPE_SCRIPTS/make_image_info.py"
+  "$HMNET_REPO/scripts/hmnet-python" "$EVENTSCAPE_SCRIPTS/merge_event_data.py"
+  for split in train val test; do
+    mkdir -p "list/$split"
+    LC_ALL=C ls ./${split}_evt/*.npy > "list/$split/events.txt"
+    LC_ALL=C ls ./${split}_img/*.npy > "list/$split/images.txt"
+    LC_ALL=C ls ./${split}_lbl/*.npy > "list/$split/labels.txt"
+    "$HMNET_REPO/scripts/hmnet-python" "$EVENTSCAPE_SCRIPTS/make_event_meta.py" "$split"
+  done
+  "$HMNET_REPO/scripts/hmnet-python" "$EVENTSCAPE_SCRIPTS/save_video_duration.py"
+  "$HMNET_REPO/scripts/hmnet-python" "$EVENTSCAPE_SCRIPTS/merge_meta.py"
+)
+```
+
+以上明确调用正确的子脚本并分别读取 `val_*` / `test_*`。**不要直接使用下方历史版 `prepair.sh` 代替这些命令**：其前三条 Python 相对路径缺少 `scripts/`，生成 val 列表时还错误地引用 `test_*`。
+
+输出为 `<split>_evt/*.npy`、`<split>_img/*.npy`、`<split>_lbl/*.npy` 和 `list/<split>/{events.txt,images.txt,labels.txt,meta.pkl,video_duration.csv}`。图像/深度 NPY 保存的是路径与时间索引，依然依赖原始 RGB/深度文件，因此应保留 `source` 链接。DVS-only 不加载 RGB 像素，但现有读取接口仍需要图像索引。
+
+### 1.2 MVSEC
+
+先准备 `source/outdoor_{day1,day2,night1}_{data,gt}.hdf5` 六个原始文件。day2 用于训练，day1/night1 用于测试。以下在预处理目录建立文件链接并生成 metadata，不复制大型 HDF5，也不往原始 source 目录写元数据。
+
+```bash
+(
+  set -e
+  HMNET_REPO="$PWD"
+  MVSEC_SOURCE=/data/lab_dataset/RGB_DVS_Fusion/MVSEC/source
+  MVSEC_PREP=/data/lab_dataset/RGB_DVS_Fusion/MVSEC/preprocessed/hmnet
+  mkdir -p "$MVSEC_PREP/source"
+  cd "$MVSEC_PREP"
+  # 此处 source 是实际目录，仅内部 HDF5 是链接。
+  for sequence in day1 day2 night1; do
+    for kind in data gt; do
+      file="outdoor_${sequence}_${kind}.hdf5"
+      test -f "$MVSEC_SOURCE/$file"
+      ln -sT "$MVSEC_SOURCE/$file" "source/$file"
+      ln -sT "source/$file" "$file"
+    done
+  done
+  "$HMNET_REPO/scripts/hmnet-python" \
+    "$HMNET_REPO/experiments/depth/data/mvsec/scripts/make_event_meta.py"
+  for sequence in day1 day2 night1; do
+    ln -sT "source/outdoor_${sequence}_meta.npy" "outdoor_${sequence}_meta.npy"
+  done
+)
+```
+
+`data_root` 指向 `preprocessed/hmnet`，其顶层必须能访问六个 HDF5 和三个 `outdoor_*_meta.npy`。也可使用匹配原始文件的官方 metadata，完成同样布局后跳过生成。当前 B1 DVS-only 无需运行 `get_stat.py` 计算 RGB 均值方差。索引脚本会读取整条事件时间轴，需预留主机内存；在线读取器仍需要这些索引，不能省略。
+
+### 1.3 准备后的 CPU 读取检查
+
+```bash
+./scripts/hmnet-python - <<'PYCODE'
+from hmnet.dataset.frame_datasets import event_frames
+base = "/data/lab_dataset/RGB_DVS_Fusion"
+for kind, name, splits in (
+    ("eventscape", "Eventscape", ("train", "val", "test")),
+    ("mvsec", "MVSEC", ("day2", "day1", "night1")),
+):
+    for split in splits:
+        dataset = event_frames(kind, f"{base}/{name}/preprocessed/hmnet", split)
+        assert len(dataset) > 0
+        data, targets, meta = dataset[0]
+        assert data["events"].shape[0] == 20
+        print(kind, split, len(dataset), data["events"].shape)
+PYCODE
+```
+
+检查只抽取每个 split 的一个样本，不能替代全量路径/标签校验和模型前向、反向、保存恢复冒烟。以上命令经源码核对；本轮文档整理未执行全量转换。缺少原始文件、事件转换结果或 metadata 时，不应直接进入正式训练。
 
 ## 2. Train
 
@@ -115,7 +217,7 @@ done
 
 # 原 HMNet 使用说明
 
-以下保留原 HMNet 的数据准备、配置及复现实验说明。
+以下是原 HMNet 的历史说明。其 B1/B3 命名、论文指标、训练策略及相对路径不属于上方 EfficientViT-B1 基线。当前 B1 请使用上方第 1–3 节；历史命令需按原实验目录布局执行，不能默认从仓库根目录照抄。
 
 # Dataset Preparation
 

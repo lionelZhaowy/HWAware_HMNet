@@ -2,11 +2,75 @@
 
 配置 [efficientvit_b1.py](config/efficientvit_b1.py)：50ms RVT Histogram → DVS单分支官方B1 → 四尺度Pyramid → YOLOX（strides 8/16/32）。无循环状态，不需要TBPTT。以下均从仓库根目录运行。
 
+## 0. 当前实现、验证范围与后续路线
+
+当前 B1 基线使用 **50 ms / 10 bins / 20 通道 RVT Histogram → 官方 EfficientViT-B1 → 四尺度 Pyramid → 各任务头**。它是无循环状态模型；尚未加入 HWAware B1、S-FIFO、自回归或 RENet/FRN 等复杂融合。目录名称含 HWAware 不代表当前骨干已经替换为硬件版本。
+
+三任务复用同一骨干实现，分别实例化、训练和保存权重，**不是共享参数的多任务联合训练**。当前分割支持 RGB-only、DVS-only、RGB+DVS；融合为双独立分支四尺度投影相加。检测及 Eventscape/MVSEC 深度当前使用 DVS-only，尚未接入 RGB 融合实验。
+
+| 任务 | 数据表示如何得到 | 当前验证范围 |
+|---|---|---|
+| DSEC 分割 | 离线共享缓存：Histogram、配准 RGB、标签及有效样本索引 | 已有真实数据冒烟、短训和训练/评估；正在开展三模态对照。保留当前缓存方案。 |
+| GEN1 检测 | 必须先转换事件/标注并生成时间索引；Histogram 在 CPU DataLoader worker 在线构建 | 已接入任务头并做真实样本冒烟；未完成正式全量收敛实验。 |
+| Eventscape / MVSEC 深度 | 必须先整理文件和生成时间索引；Histogram 在 CPU DataLoader worker 在线构建 | 已接入任务头并做真实样本冒烟；未完成正式全量收敛实验。 |
+
+**在线 Histogram 不等于 GPU 预处理，也不等于下载后即可训练。** 一次性格式转换/索引与逐窗口稠密缓存是不同步骤；共享准备结果可被多个工程复用，不需要每个工程重新生成。
+
+后续先在分割上验证事件表示、骨干、融合和时序自回归的方案，再将确认的公共结构迁移到检测/深度，适配任务头与数据协议并重新验证。下方命令服务于当前 B1 基线，不代表这些后续模块已实现或检测/深度已完成正式实验。分割三模态实验的训练设置应一致；不同任务目前的超参数并不相同，检测/深度默认值是待验证的基线设置。
+
 ## 1. 数据集准备（共享目录）
 
-将原HMNet预处理结果放在 `/data/lab_dataset/RGB_DVS_Fusion/GEN1/preprocessed/hmnet/`（或SSD数据集目录下同名层级），配置 `data_root` 指向这里。要求 `train_evt/train_lbl/val_evt/val_lbl/test_evt/test_lbl`，以及 `list/<split>/{events.txt,labels.txt,meta.pkl,gt_interval.csv}`。原始DAT目录不能直接用于训练。复用下方原预处理流程时，在共享目录布置 `source` 和 `scripts` 链接后运行脚本，输出仍留在共享目录；已有完整结果直接复用。
+**原始 DAT 和 bbox NPY 仅下载解压还不能训练。** 必须转换事件、统一标签字段并标记无效框，再生成列表和毫秒级事件索引。不会离线生成 Histogram 图像。
 
-DSEC缓存已迁移；本轮未对GEN1原数据或其他预处理目录进行移动、未执行全量预处理。GEN1 Histogram通过现有EventFrame在线构建，不需要每个工程生成一套稠密缓存。
+要求解压目录为 `/data/lab_dataset/RGB_DVS_Fusion/GEN1/source/detection_dataset_duration_60s_ratio_1.0/{train,val,test}/`。每个 split 内包含配套的 DAT 事件及 bbox NPY。工具箱 `hmnet/utils/psee_toolbox` 已随当前工程提供，无需重复 clone 覆盖。
+
+以下从仓库根目录执行，使用已解压的完整原始数据。首次在共享 `preprocessed/hmnet` 下生成；有完整结果时直接复用。命令在子 shell 内切换目录，结束后仍在仓库根目录。不要对已有训练使用的预处理目录重复执行转换；测试准备流程请另选输出目录。
+
+```bash
+(
+  set -e
+  HMNET_REPO="$PWD"
+  GEN1_SOURCE=/data/lab_dataset/RGB_DVS_Fusion/GEN1/source
+  GEN1_PREP=/data/lab_dataset/RGB_DVS_Fusion/GEN1/preprocessed/hmnet
+  test -d "$GEN1_SOURCE/detection_dataset_duration_60s_ratio_1.0/train"
+  mkdir -p "$GEN1_PREP"
+  cd "$GEN1_PREP"
+  ln -sT "$GEN1_SOURCE" source
+  GEN1_SCRIPTS="$HMNET_REPO/experiments/detection/data/gen1/scripts"
+  for split in train val test; do
+    "$HMNET_REPO/scripts/hmnet-python" "$GEN1_SCRIPTS/modify_lbl_field_name.py" \
+      "./source/detection_dataset_duration_60s_ratio_1.0/$split/" "./${split}_lbl/"
+    "$HMNET_REPO/scripts/hmnet-python" "$GEN1_SCRIPTS/preproc_events.py" "$split"
+    "$HMNET_REPO/scripts/hmnet-python" "$GEN1_SCRIPTS/validate_bbox.py" \
+      "./${split}_lbl/" "./${split}_lbl/"
+    mkdir -p "list/$split"
+    LC_ALL=C ls ./${split}_evt/*.npy > "list/$split/events.txt"
+    LC_ALL=C ls ./${split}_lbl/*.npy > "list/$split/labels.txt"
+    "$HMNET_REPO/scripts/hmnet-python" "$GEN1_SCRIPTS/make_event_meta.py" "$split"
+  done
+  "$HMNET_REPO/scripts/hmnet-python" "$GEN1_SCRIPTS/merge_meta.py"
+  "$HMNET_REPO/scripts/hmnet-python" "$GEN1_SCRIPTS/get_gt_interval.py"
+)
+```
+
+产物包括 `train_evt/train_lbl/val_evt/val_lbl/test_evt/test_lbl`、中间 `*_meta` 和 `list/<split>/{events.txt,labels.txt,meta.pkl,gt_interval.csv}`。标签中的 `invalid` 字段用于保持现有检测过滤/评估协议。若复用官方 metadata，必须核对文件名、split 和对应事件数组，不能只把 metadata 放到原始 DAT 旁边。
+
+准备后的 CPU 读取检查（逐 split 抽一个样本；不代表全量完整性或收敛验收）：
+
+```bash
+./scripts/hmnet-python - <<'PYCODE'
+from hmnet.dataset.frame_datasets import event_frames
+root = "/data/lab_dataset/RGB_DVS_Fusion/GEN1/preprocessed/hmnet"
+for split in ("train", "val", "test"):
+    dataset = event_frames("gen1", root, split)
+    assert len(dataset) > 0
+    events, targets, meta = dataset[0]
+    assert events.shape[0] == 20
+    print(split, len(dataset), events.shape)
+PYCODE
+```
+
+训练配置 `data_root` 指向上述预处理目录，不能指向原始 DAT 目录。完整流程可能耗时较长且生成额外事件 NPY；本文给出的是经源码核对的操作步骤，本轮文档整理没有执行全数据转换。
 
 ## 2. Train
 
@@ -79,7 +143,7 @@ mkdir -p logs/detection/efficientvit_b1/evaluation/test
 
 # 原 HMNet 使用说明
 
-以下保留原 HMNet 的数据准备、配置及复现实验说明。
+以下是原 HMNet 的历史说明。其 B1/B3 命名、论文指标、训练策略及相对路径不属于上方 EfficientViT-B1 基线。当前 B1 请使用上方第 1–3 节；历史命令需按原实验目录布局执行，不能默认从仓库根目录照抄。
 
 # Dataset Preparation
 
