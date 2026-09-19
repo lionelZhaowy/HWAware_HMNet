@@ -43,7 +43,10 @@ from .cspdarknet_gru import CSPDarkNetGRU
 from .swin_gru import SwinTransformerGRU
 
 
+from .efficientvit_b1 import EfficientViTB1
+
 BACKBONES = {
+    'EfficientViTB1': EfficientViTB1,
     'HMNet': HMNet,
     'HMNet1': HMNet1,
     'ConvNeXt': ConvNeXt,

@@ -15,3 +15,12 @@ Pillow==10.4.0
 opencv-python>=4.10,<4.11
 pycocotools==2.0.8
 pybind11==2.13.6
+
+# Frame B1 calibration and ONNX validation/export.
+PyYAML==6.0.2
+onnx==1.17.0
+onnxruntime==1.20.2
+onnxsim==0.4.36
+
+# B1 training visualization (available in the pytorch environment).
+tensorboard==2.17.0

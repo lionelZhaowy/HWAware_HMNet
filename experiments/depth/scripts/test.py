@@ -45,6 +45,7 @@ if __name__ == '__main__':
     parser.add_argument('--devices', type=int, nargs='*', help='')
     parser.add_argument('--fast', action='store_true', help='Convert to fast model')
     parser.add_argument('--fp16', action='store_true', help='Run in FP16 mode')
+    parser.add_argument('--output', type=str, help='B1: experiment output directory')
     args = parser.parse_args()
 
 # ========= for debug ==========
@@ -269,6 +270,12 @@ def get_config(args):
     dirname = get_dirname(args.data_list)
     config.dpath_work = f'./workspace/{name}'
     config.dpath_out = f'./workspace/{name}/result/pred_{dirname}'
+    if getattr(config, 'frame_evaluation', False):
+        if args.output is not None:
+            config.output = args.output
+        # B1 predictions and checkpoints belong to the selected formal run.
+        config.dpath_work = os.path.abspath(config.output)
+        config.dpath_out = os.path.join(config.dpath_work, 'result', f'pred_{dirname}')
 
     return config
 

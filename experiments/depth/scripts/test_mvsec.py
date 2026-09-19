@@ -44,6 +44,8 @@ if __name__ == '__main__':
     parser.add_argument('--devices', type=int, nargs='*', help='')
     parser.add_argument('--fast', action='store_true', help='Convert to fast model')
     parser.add_argument('--fp16', action='store_true', help='Run in FP16 mode')
+    parser.add_argument('--output', type=str, help='B1: experiment output directory')
+    parser.add_argument('--data-root', type=str, help='MVSEC data/gt/meta directory')
     args = parser.parse_args()
 
 # ========= for debug ==========
@@ -222,6 +224,11 @@ def get_config(args):
     config.data = f'./data/mvsec/source/outdoor_{args.data}_data.hdf5'
     config.gt   = f'./data/mvsec/source/outdoor_{args.data}_gt.hdf5'
     config.meta = f'./data/mvsec/source/outdoor_{args.data}_meta.npy'
+    if getattr(config, 'frame_evaluation', False):
+        data_root = args.data_root or config.data_root
+        config.data = os.path.join(data_root, f'outdoor_{args.data}_data.hdf5')
+        config.gt = os.path.join(data_root, f'outdoor_{args.data}_gt.hdf5')
+        config.meta = os.path.join(data_root, f'outdoor_{args.data}_meta.npy')
     config.image_stat = args.image_stat
     config.pretrained = args.pretrained
     config.random_init = args.random_init
@@ -240,6 +247,12 @@ def get_config(args):
 
     config.dpath_work = f'./workspace/{name}'
     config.dpath_out = f'./workspace/{name}/result/pred_{dirname}'
+    if getattr(config, 'frame_evaluation', False):
+        if args.output is not None:
+            config.output = args.output
+        # B1 predictions and checkpoints belong to the selected formal run.
+        config.dpath_work = os.path.abspath(config.output)
+        config.dpath_out = os.path.join(config.dpath_work, 'result', f'pred_{dirname}')
 
     return config
 

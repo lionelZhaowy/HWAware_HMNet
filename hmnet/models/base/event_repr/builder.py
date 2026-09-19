@@ -34,7 +34,10 @@ from .basic import TimeSurface
 from .basic import VoxelGrid
 
 
+from .rvt_histogram import RVTHistogram
+
 EVENT_REPRS = {
+    'RVTHistogram': RVTHistogram,
     'Histogram': Histogram,
     'TimeSurface': TimeSurface,
     'VoxelGrid': VoxelGrid,

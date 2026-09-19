@@ -44,6 +44,12 @@ parser.add_argument('--master', type=str, default='localhost', help='[DDP] IP ad
 parser.add_argument('--node'  , type=str, default='1/1'      , help='[DDP] Specify node index and total number of nodes in the form of "{Node_Index}/{Total_Number_of_Nodes}" (e.g. 1/2, 2/2).\
                                                                      Master node must have node index = 1.\
                                                                      Specify "1/1" for single node DDP (default)')
+# Frame B1 overrides; normal runs read TrainSettings directly.
+parser.add_argument('--epochs', type=int, help='B1: total data epochs (clears explicit updates)')
+parser.add_argument('--updates', type=int, help='B1: total optimizer updates instead of epochs')
+parser.add_argument('--resume', type=str, help='B1: resume a task checkpoint')
+parser.add_argument('--output', type=str, help='B1: experiment output directory')
+parser.add_argument('--data-root', type=str, help='B1: shared cache/preprocessed data root')
 args = parser.parse_args()
 
 import os
@@ -625,6 +631,14 @@ def parse_event_data(data):
 if __name__ == '__main__':
     __spec__ = None
     args.name = args.config.split('/')[-1].replace('.py', '')
+    module = load_config(args.config)
+    settings = getattr(module, 'TrainSettings')()
+    if getattr(settings, 'frame_training', False):
+        from hmnet.utils.frame_train import run, configure_frame_training
+        configure_frame_training(settings, args)
+        run(settings, args)
+        sys.exit(0)
+
 
     if args.distributed:
         master, rank_offset, world_size, local_size = get_ddp_settings(args.master, args.node)

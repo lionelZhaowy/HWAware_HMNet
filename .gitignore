@@ -33,3 +33,6 @@ hmnet/utils/psee_toolbox
 !experiments/*/data/*/scripts
 artifacts/
 tests/
+
+# Formal training, TensorBoard, evaluation, and data caches.
+/logs/

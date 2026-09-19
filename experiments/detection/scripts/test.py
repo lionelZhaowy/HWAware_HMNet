@@ -46,6 +46,7 @@ if __name__ == '__main__':
     parser.add_argument('--fast', action='store_true', help='Convert to fast model')
     parser.add_argument('--fp16', action='store_true', help='Run in FP16 mode')
     parser.add_argument('--compile', type=str, choices=('jit', 'trt', 'onnx', 'otrt', 'inductor', 'aot_ts_nvfuser'), help='Compile and accelarate the model')
+    parser.add_argument('--output', type=str, help='B1: experiment output directory')
     args = parser.parse_args()
 
 import os
@@ -160,8 +161,7 @@ def reformat_result(list_bbox_dict, image_metas):
     outputs = []
     BBOX_DTYPE = np.dtype({'names':['t','x','y','w','h','class_id','track_id','class_confidence'], 'formats':['<i8','<f4','<f4','<f4','<f4','<u4','<u4','<f4'], 'offsets':[0,8,12,16,20,24,28,32], 'itemsize':40})
     for bboxes_dict, image_meta in zip(list_bbox_dict, image_metas):
-        if len(bboxes_dict['bboxes']) == 0:
-            continue
+        # Preserve a typed empty array so an all-background sequence can be saved.
         bboxes = bboxes_dict['bboxes'].cpu().numpy().astype(np.float32)
         labels = bboxes_dict['labels'].cpu().numpy().astype(np.uint32)
         scores = bboxes_dict['scores'].cpu().numpy().astype(np.float32)
@@ -242,6 +242,12 @@ def get_config(args):
     dirname = get_dirname(args.data_list)
     config.dpath_work = f'./workspace/{name}'
     config.dpath_out = f'./workspace/{name}/result/pred_{dirname}'
+    if getattr(config, 'frame_evaluation', False):
+        if args.output is not None:
+            config.output = args.output
+        # B1 predictions and checkpoints belong to the selected formal run.
+        config.dpath_work = os.path.abspath(config.output)
+        config.dpath_out = os.path.join(config.dpath_work, 'result', f'pred_{dirname}')
 
     return config
 

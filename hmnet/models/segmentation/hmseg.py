@@ -36,6 +36,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..base.blocks import BlockBase
+from ..frame import is_frame_model, frame_loss, frame_inference
 from ..base.init import init_transformer
 from ..base.backbone.builder import build_backbone
 from ..base.neck.builder import build_neck
@@ -75,6 +76,8 @@ class HMSeg(BlockBase):
         self.aux_head = self.aux_head.to(d0)
 
     def forward(self, list_events, list_images, list_image_metas, list_gt, init_states=True) -> Tensor:
+        if is_frame_model(self):
+            return frame_loss(self, list_events, list_images, list_image_metas, list_gt, 'segmentation')
         if init_states:
             self.idx_offset = 0
 
@@ -101,6 +104,8 @@ class HMSeg(BlockBase):
         return outputs
 
     def inference(self, list_events, list_images, list_image_metas, speed_test=False) -> Tensor:
+        if is_frame_model(self):
+            return frame_inference(self, list_events, list_images, list_image_metas, 'segmentation')
         output = []
         output_image_metas = []
         d0 = self.devices[0]

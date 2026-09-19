@@ -32,8 +32,8 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('config', type=str, help='Config file')
-    parser.add_argument('data_list', type=str, help='Path for directory containing file lists for testing')
-    parser.add_argument('data_root', type=str, help='Path for dataset root directory')
+    parser.add_argument('data_list', nargs='?', type=str, help='HMNet file-list directory; B1 split (default: dev)')
+    parser.add_argument('data_root', nargs='?', type=str, help='Dataset root; B1 defaults to config.cache')
     parser.add_argument('--mode', type=str, default='single_process', choices=('single_process', 'multi_process', 'cuda_stream'), help='')
     parser.add_argument('--speed_test', action='store_true', help='Measure inference time')
     parser.add_argument('--name', type=str, default=None, help='Name of the model. (default value is set by this script name)')
@@ -46,6 +46,7 @@ if __name__ == '__main__':
     parser.add_argument('--fast', action='store_true', help='Convert to fast model')
     parser.add_argument('--fp16', action='store_true', help='Run in FP16 mode')
     parser.add_argument('--fuse_right', action='store_true', help='Use right images for fusion models')
+    parser.add_argument('--output', type=str, help='B1: experiment output directory')
     args = parser.parse_args()
 
 # ======= for debug ===========
@@ -267,6 +268,13 @@ def get_dirname(path):
 
 if __name__ == '__main__':
     __spec__ = None
+    frame_config = load_config(args.config).TestSettings()
+    if getattr(frame_config, 'frame_evaluation', False):
+        from hmnet.utils.frame_train import run_seg_evaluation
+        run_seg_evaluation(frame_config, args)
+        sys.exit(0)
+    if args.data_list is None or args.data_root is None:
+        parser.error('HMNet requires data_list and data_root; only B1 can omit them')
     config = get_config(args)
     makedirs(config.dpath_out)
     main(config)
