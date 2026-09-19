@@ -11,12 +11,13 @@ def frame_features(model, events, images=None):
     device = next(model.parameters()).device
     events = torch.stack(events) if isinstance(events, (list, tuple)) else events
     rgb = None
-    if model.backbone.fusion:
+    if getattr(model.backbone, "use_rgb", model.backbone.fusion):
         if images is None or any(x is None for x in images):
             raise ValueError("RGB fusion sample has no synchronized image")
         rgb = torch.stack(images) if isinstance(images, (list, tuple)) else images
         rgb = rgb.to(device)
-    return model.backbone(events.to(device), rgb)
+    events = events.to(device) if getattr(model.backbone, "use_events", True) else None
+    return model.backbone(events, rgb)
 
 
 def frame_loss(model, events, images, metas, targets, kind, boxes=None, ignore=None):
@@ -29,7 +30,8 @@ def frame_loss(model, events, images, metas, targets, kind, boxes=None, ignore=N
             for i, t in enumerate(targets)
             if t is not None
             and (
-                torch.isfinite(t) & ((t > 0) if model.reg_head.clip_gt else ((t >= lo) & (t <= hi)))
+                torch.isfinite(t)
+                & ((t > 0) if model.reg_head.clip_gt else ((t >= lo) & (t <= hi)))
             ).any()
         ]
     else:
@@ -74,7 +76,11 @@ def frame_inference(model, events, images, metas, kind):
         results, metadata = [], []
         for i, batch_meta in enumerate(metas):
             output, selected = frame_inference(
-                model, events[i], images[i] if images is not None else None, batch_meta, kind
+                model,
+                events[i],
+                images[i] if images is not None else None,
+                batch_meta,
+                kind,
             )
             results.extend(output)
             metadata.extend(selected)
@@ -87,7 +93,11 @@ def frame_inference(model, events, images, metas, kind):
             (
                 dict(bboxes=d[:, :4], labels=d[:, 6], scores=d[:, 4] * d[:, 5])
                 if d is not None
-                else dict(bboxes=torch.empty(0, 4), labels=torch.empty(0), scores=torch.empty(0))
+                else dict(
+                    bboxes=torch.empty(0, 4),
+                    labels=torch.empty(0),
+                    scores=torch.empty(0),
+                )
             )
             for d in detections
         ]
