@@ -2,6 +2,18 @@
 
 This repo is a PyTorch implementation of HMNet proposed in our paper: [Hierarchical Neural Network for Low Latency Event Processing](https://hamarh.github.io/hmnet/).
 
+## 当前工程入口与实验阶段
+
+本仓库保留原 HMNet，并增加无状态官方 EfficientViT-B1 基线。**下方原论文 HMNet-B1/B3 的结果不是新 EfficientViT-B1 的实测结果**，名称中的 B1 也不表示相同模型。
+
+- [分割：DSEC，数据准备 / train / test](experiments/segmentation/README.md)：当前先验证 RGB、DVS、RGB+DVS，保留共享离线缓存。
+- [检测：GEN1，数据准备 / train / test](experiments/detection/README.md)：已接入 B1 并做真实样本冒烟，正式全量实验待开展。
+- [深度：Eventscape / MVSEC，数据准备 / train / test](experiments/depth/README.md)：已接入 B1 并做真实样本冒烟，正式全量实验待开展。
+
+三任务复用骨干结构、分别训练，不是共享参数的多任务学习。先在分割实验确定事件帧表示、骨干、融合及后续时序自回归方案，再逐项迁移至检测/深度。当前代码使用 RVT Histogram、官方 B1，分割融合为四尺度投影相加；HWAware、S-FIFO、自回归和复杂融合尚未接入。
+
+检测/深度的 Histogram 当前在 CPU worker 在线计算，但下载后仍须离线整理事件/标签并生成时间索引；任务 README 提供共享目录下的命令。预处理结果放数据集 `preprocessed/`，训练和评估结果放本工程 `logs/`，无需跨工程访问训练目录。三个分割模态实验保持相同训练配置，不能把其超参数直接视为检测/深度正式方案。
+
 ## Results and models
 
 The pre-trained weights are released under the Creative Commons BY-SA 4.0 License.
