@@ -1,6 +1,7 @@
 """Single-GPU independent-window training, dispatched by the existing task CLIs."""
 
 import json
+import math
 import random
 import shutil
 from collections import defaultdict
@@ -121,6 +122,48 @@ def resolve_training_updates(config, batches_per_epoch):
     return (batches_per_epoch * epochs + config.accumulation - 1) // config.accumulation
 
 
+def training_schedule(config, batches_per_epoch, max_updates):
+    """Store the complete schedule in checkpoints, including its fixed end point."""
+    kind = getattr(config, "lr_schedule", "constant")
+    if kind not in ("constant", "warmup_cosine"):
+        raise ValueError(f"Unknown lr_schedule: {kind}")
+    base = float(config.learning_rate)
+    minimum = float(getattr(config, "min_learning_rate", base))
+    warmup = math.ceil(
+        batches_per_epoch * getattr(config, "warmup_epochs", 0) / config.accumulation
+    )
+    factor = float(getattr(config, "warmup_start_factor", 0.1))
+    if base <= 0 or not 0 <= minimum <= base or not 0 < factor <= 1:
+        raise ValueError("Invalid learning rate, minimum or warmup_start_factor")
+    if kind == "warmup_cosine" and not 0 <= warmup < max_updates:
+        raise ValueError("Warmup must be shorter than the total training budget")
+    return dict(
+        kind=kind,
+        base_lr=base,
+        min_lr=minimum,
+        warmup_updates=warmup,
+        warmup_start_factor=factor,
+        total_updates=max_updates,
+    )
+
+
+def learning_rate_at(update, schedule):
+    """LR for a 1-based successful optimizer update; AMP retries reuse the same LR."""
+    if schedule["kind"] == "constant":
+        return schedule["base_lr"]
+    warmup = schedule["warmup_updates"]
+    if update <= warmup:
+        progress = (update - 1) / max(1, warmup - 1)
+        return schedule["base_lr"] * (
+            schedule["warmup_start_factor"]
+            + (1 - schedule["warmup_start_factor"]) * progress
+        )
+    progress = (update - warmup) / (schedule["total_updates"] - warmup)
+    return schedule["min_lr"] + 0.5 * (schedule["base_lr"] - schedule["min_lr"]) * (
+        1 + math.cos(math.pi * min(1.0, progress))
+    )
+
+
 def run(config, args):
     if args.distributed:
         raise ValueError(
@@ -151,9 +194,31 @@ def run(config, args):
         collate_fn=collate_keep_dict,
         pin_memory=True,
         drop_last=False,
-        persistent_workers=config.workers > 0,
+        # DSEC workers must receive the new epoch for reproducible augmentation.
+        persistent_workers=config.workers > 0 and not hasattr(dataset, "set_epoch"),
     )
     max_updates = resolve_training_updates(config, len(loader))
+    schedule = training_schedule(config, len(loader), max_updates)
+    eval_every = getattr(config, "eval_every_epochs", None)
+    if eval_every is not None and eval_every <= 0:
+        raise ValueError("eval_every_epochs must be positive")
+    eval_interval = (
+        max(1, math.ceil(len(loader) * eval_every / config.accumulation))
+        if eval_every is not None
+        else 50
+    )
+    # Changing these during resume would invalidate data order or the LR curve.
+    contract = dict(
+        schedule=schedule,
+        modality=getattr(config, "modality", "dvs"),
+        batch_size=config.batch_size,
+        accumulation=config.accumulation,
+        train_samples=len(dataset),
+        weight_decay=config.weight_decay,
+        amp=args.amp,
+        seed=args.seed,
+        data_root=str(getattr(config, "cache", getattr(config, "data_root", ""))),
+    )
     print(
         json.dumps(
             dict(
@@ -162,6 +227,8 @@ def run(config, args):
                 epochs=getattr(config, "epochs", None),
                 requested_updates=config.updates,
                 resolved_updates=max_updates,
+                schedule=schedule,
+                modality=getattr(config, "modality", "dvs"),
                 batch_size=config.batch_size,
                 accumulation=config.accumulation,
             )
@@ -174,8 +241,16 @@ def run(config, args):
     )
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp, init_scale=1024.0)
     step, epoch, cursor = 0, 0, 0
+    best_miou, best_step = -1.0, 0
     if config.resume:
         ckpt = torch.load(config.resume, map_location="cpu", weights_only=False)
+        if schedule["kind"] != "constant" and ckpt.get("training_contract") != contract:
+            raise ValueError(
+                "Resume training contract differs (modality/data/batch/seed/LR budget). "
+                "Use the original settings; old constant-LR runs are separate experiments."
+            )
+        best_miou = ckpt.get("best_miou", -1.0)
+        best_step = ckpt.get("best_step", 0)
         model.load_state_dict(ckpt["state_dict"], strict=True)
         optimizer.load_state_dict(ckpt["optimizer"])
         scaler.load_state_dict(ckpt["scaler"])
@@ -223,6 +298,9 @@ def run(config, args):
                 batch=config.batch_size,
                 accumulation=config.accumulation,
                 lr=config.learning_rate,
+                lr_schedule=schedule,
+                modality=getattr(config, "modality", "dvs"),
+                eval_interval_updates=eval_interval,
                 weight_decay=config.weight_decay,
                 amp=args.amp,
                 data_root=str(
@@ -241,6 +319,8 @@ def run(config, args):
         data_epoch = start_epoch
         while True:
             generator.manual_seed(args.seed + data_epoch)
+            if hasattr(dataset, "set_epoch"):
+                dataset.set_epoch(data_epoch, args.seed)
             for idx, batch in enumerate(loader):
                 if data_epoch == start_epoch and idx < start_cursor:
                     continue
@@ -258,6 +338,10 @@ def run(config, args):
         flush_secs=30,
     ) as writer:
         while step < max_updates:
+            # Apply BEFORE optimizer.step: the logged LR is the one actually used.
+            lr = learning_rate_at(step + 1, schedule)
+            for group in optimizer.param_groups:
+                group["lr"] = lr
             model.train()
             optimizer.zero_grad(set_to_none=True)
             started = time.perf_counter()
@@ -316,10 +400,19 @@ def run(config, args):
                 samples_per_second=samples / seconds,
                 peak_memory_mib=torch.cuda.max_memory_allocated() / 2**20,
             )
+            is_best = False
             if validation is not None and (
-                step == 1 or step % 50 == 0 or step == max_updates
+                step == 1 or step % eval_interval == 0 or step == max_updates
             ):
-                record["dev"] = evaluate_seg(model, validation, config.batch_size)
+                record["dev"] = evaluate_seg(
+                    model,
+                    validation,
+                    getattr(config, "eval_batch_size", config.batch_size),
+                )
+                is_best = record["dev"]["miou"] > best_miou
+                if is_best:
+                    best_miou, best_step = record["dev"]["miou"], step
+                record.update(best_miou=best_miou, best_step=best_step)
                 if getattr(config, "overfit", 0):
                     record["fixed_train"] = evaluate_seg(
                         model, dataset, config.batch_size
@@ -328,9 +421,12 @@ def run(config, args):
                 f.write(json.dumps(record) + "\n")
             write_tensorboard(writer, record)
             print(json.dumps(record), flush=True)
-            if step % 50 == 0 or step == max_updates:
+            if is_best or step % eval_interval == 0 or step == max_updates:
                 checkpoint = dict(
                     state_dict=model.state_dict(),
+                    training_contract=contract,
+                    best_miou=best_miou,
+                    best_step=best_step,
                     optimizer=optimizer.state_dict(),
                     scaler=scaler.state_dict(),
                     step=step,
@@ -344,6 +440,11 @@ def run(config, args):
                 temp = output / "checkpoint.tmp.pth"
                 torch.save(checkpoint, temp)
                 temp.replace(output / "checkpoint.pth")
+                if is_best:
+                    # Keep a full resume-able best checkpoint, chosen only on dev.
+                    best_temp = output / "best_checkpoint.tmp.pth"
+                    shutil.copyfile(output / "checkpoint.pth", best_temp)
+                    best_temp.replace(output / "best_checkpoint.pth")
                 writer.flush()
     return model
 

@@ -1,20 +1,30 @@
-# EfficientViT-B1 使用说明
+# EfficientViT-B1 分割：300 epoch 模态对照实验
 
-本节是无状态的官方 EfficientViT-B1 RGB+DVS双分支分割模型，配置见 [efficientvit_b1.py](config/efficientvit_b1.py)。它与原 `hmnet_B1.py` 不同。以下命令均从**仓库根目录**运行，使用 `scripts/hmnet-python` 对应的 Conda pytorch 环境。
+本工程默认 **DVS-only**，分支 `seg_dvs_640x440_v1`。统一模型代码支持 `rgb`、`dvs`、`rgbdvs`；单模态只创建自己的编码器和投影层，不以置零输入冒充单模态训练。配置见 [efficientvit_b1.py](config/efficientvit_b1.py)。
 
-## 1. 数据集准备（共享缓存，只需一次）
+| 工程 | 分支 | 用途 |
+|---|---|---|
+| HWAware_HMNet | main | 新一轮 RGB+DVS |
+| HWAware_HMNet_Seg_RGB_640x440_v1 | seg_rgb_640x440_v1 | RGB-only |
+| HWAware_HMNet_Seg_DVS_640x440_v1 | seg_dvs_640x440_v1 | DVS-only |
+| HWAware_HMNet_Seg_RGBDVS_640x440_v1 | seg_rgbdvs_640x440_v1 | 上一轮固定学习率实验的存档，不应用新超参数 |
 
-本机全量缓存已准备并迁移至：
+以下命令从**各自工程根目录**运行。三种新实验分别从同一官方ImageNet B1预训练权重初始化，不续训上一轮任务权重。对照实验共用样本、划分、增强、任务头和训练设置，模型参数不共享。
+
+## 1. 数据集准备
+
+已完成共享缓存，无需重新处理：
 
 ```text
-/home/zhaowenyao24/Conda_prj/lab_dataset/DSEC_Semantic/
-├── source/                         原始事件、RGB、语义标签
-└── preprocessed/
-    ├── dsec_b1/                    8082个样本，manifest及配准检查图
-    └── dsec_b1_assets/             已下载的标定与rectify_map
+/home/zhaowenyao24/Conda_prj/lab_dataset/DSEC_Semantic/preprocessed/
+├── dsec_b1/          train=7295，dev=787（zurich_city_08_a）
+├── dsec_b1_test/     官方test=2809
+└── dsec_b1_assets/   标定资产
 ```
 
-**已有完整缓存直接进入 train，无需重新转换。** 新机器或新数据的准备命令：
+三组均使用同一RGB已配准的缓存及其有效样本索引，避免模态对照混入样本差异。RGB使用ImageNet标准化；DVS使用50ms、10bins、20通道RVT Histogram。仅训练时共同水平翻转，不新增随机时间或尺寸增强。翻转由seed、数据轮次和样本索引确定，三组及续训采用相同增强；每轮重建加载worker以更新轮次。数据读取器仍可读取缓存中的两种输入，但模型仅使用所选模态，未选模态不送入GPU骨干。
+
+在新机器上准备时（已有manifest会拒绝覆盖）：
 
 ```bash
 ./scripts/hmnet-python scripts/prepare_dsec_b1.py \
@@ -23,125 +33,87 @@
   --download-assets
 ```
 
-默认输出到 `source` 的父目录下 `preprocessed/dsec_b1`，默认使用全部标签；`--per-sequence 32` 仅用于有界检查，应配合不同 `--output`。已有 manifest 时准备器拒绝覆盖。HDD 上同样遵循 `<数据集>/preprocessed/` 布局。多个工程直接读取同一缓存，不跨工程访问 logs。
-
-Histogram 为50ms、10bins、20通道，复用RVT；官方标定将左RGB映射至原始左事件坐标，再保留顶部440×640。RGB仅选择目标之前50ms内的最近帧；映射不补偿平移造成的深度相关视差。`zurich_city_08_a` 的787个样本用于开发验证，其余7295个训练；不用官方测试集调参。
-
-原工程 `logs/datasets/dsec_b1` 和标定路径仅保留为软链接，供迁移前已启动的训练继续读取。新配置 `cache` 直接指向上述共享路径。
+增加 `--split test` 会生成独立的 `dsec_b1_test`。预训练文件为本工程 `pretrained/efficientvit_b1_r224.pth`，权重、缓存不进入Git。
 
 ## 2. Train
 
-在 [TrainSettings](config/efficientvit_b1.py) 设置 `epochs=100, updates=None` 后直接运行：
+选择空闲GPU；在三个工程分别运行以下命令即可，默认模态由各工程配置决定：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/train.py \
-  experiments/segmentation/config/efficientvit_b1.py --single --amp
+  experiments/segmentation/config/efficientvit_b1.py --single --amp --seed 42
 ```
 
-先用 `nvidia-smi` 选择空闲GPU。当前保留用户设置的 `batch_size=32, accumulation=8`，有效batch通常256；7295个样本对应每轮228批，100轮自动换算为2850次更新。默认输出 `logs/segmentation/efficientvit_b1/`。独立实验可加 `--output logs/segmentation/run02`。
+正式输出为各工程独立的 `logs/segmentation/efficientvit_b1/`，不会写入共享缓存或artifacts。初始输出目录为空时直接开始；新实验使用其他 `--output`，不要误覆盖仍需保留的结果。
 
-续训示例（累计目标必须超过已完成步数）：
+### 三组统一 TrainSettings
 
-```bash
-CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/train.py \
-  experiments/segmentation/config/efficientvit_b1.py --single --amp \
-  --resume logs/segmentation/efficientvit_b1/checkpoint.pth --epochs 200
-```
-
-**2026-09-19核查：已有 `full_100ep` 实验实际 batch=32，但沿用了按batch=2计算的45600步预算，等价约1600轮。目录名不能作为epoch依据。** 本轮未停止或修改该进程的预算。要维持其原目标，用新版 `--updates 45600` 并指定原 `--resume`、`--output`；若改用epochs，先确认检查点实际轮数，100轮目标已经不足以继续当前实验。
-
-分割专用设置：`overfit=0` 使用全部训练样本且共同水平翻转；正整数N只用前N个样本、关闭翻转，用于过拟合检查，不是训练轮数。小样本检查可把 `workers=0`。`cache` 是共享数据路径。测试的 `TestSettings.batch_size=2` 独立于训练batch，避免大批量评估占用过多显存。
-
-### TrainSettings 参数
-
-| 参数 | 含义与设置 |
+| 参数 | 设置与含义 |
 |---|---|
-| `epochs` | 目标数据轮数，默认100；`updates=None` 时生效。 |
-| `updates` | 显式的**累计优化器更新次数**，默认 `None`。正整数优先于 epochs，用于短训/精确步数实验。 |
-| `batch_size` | 每个 microbatch 的样本数；单次前向/反向的批量。最后不足一批也保留。 |
-| `accumulation` | 累积多少个有效 microbatch 才更新参数；默认8。通常有效 batch=`batch_size × accumulation`。 |
-| `learning_rate` | AdamW 学习率，默认 `2e-4`，当前固定不衰减。 |
-| `weight_decay` | AdamW 权重衰减，默认 `0.01`。 |
-| `workers` | DataLoader 子进程数，默认2；0在主进程加载。 |
-| `output` | 本工程的训练产物目录，默认 `logs/<任务>/efficientvit_b1/...`，包含权重、指标、TensorBoard及评估结果。 |
-| `resume` | 同一实验的完整任务检查点路径；空字符串从初始化开始。 |
-| `pretrained` | 官方 ImageNet B1 分类权重路径，仅用于初始化，不是任务续训权重。 |
-| `cache` / `data_root` | 共享预处理数据目录；分割使用 cache，检测/深度使用 data_root。 |
-| `task` / `frame_training` | 内部任务标识和帧式分派开关，通常无需修改。 |
+| `modality` | 唯一的模态变量：`rgbdvs` / `rgb` / `dvs`。 |
+| `epochs` | 300个数据轮次；由实际DataLoader长度自动换算。 |
+| `updates` | `None`；指定正整数时改用累计优化器更新预算。正式对照不覆盖。 |
+| `batch_size` | 32；每次前向/反向32个样本，最后不足一批保留。 |
+| `accumulation` | 1；每个有效小批次更新一次，有效batch通常32。 |
+| `learning_rate` | AdamW峰值学习率 `2e-4`。 |
+| `lr_schedule` | `warmup_cosine`：线性预热后余弦下降。 |
+| `warmup_epochs` | 5轮，对应1140次更新。 |
+| `warmup_start_factor` | 0.1，首次更新lr=`2e-5`，预热末尾到`2e-4`。 |
+| `min_learning_rate` | `2e-6`，300轮最后一次更新时到达。 |
+| `weight_decay` | 0.01。 |
+| `workers` | 2个数据加载进程。 |
+| `eval_every_epochs` | 1；每轮验证，另在第1次更新和结束时验证。 |
+| `eval_batch_size` | 8；控制训练中验证的显存，不影响训练batch。 |
+| `overfit` | 0表示全训练集；正整数限制前N个样本并禁用翻转，仅供调试。 |
+| `pretrained` | 官方ImageNet初始化路径，不是任务resume检查点。 |
+| `resume` | 默认空；新三组必须从头初始化。 |
+| `cache` | 上述共享训练/dev缓存。 |
+| `output` | 本工程的独立logs目录。 |
 
-训练器自动计算 `ceil(len(train_loader) × epochs / accumulation)`，无需终端计算 step。累积可跨轮，最后可能多读不足一个累积窗口的批次；无效批次和AMP溢出重试也可能增加实际遍历量，因此 epochs 是换算预算，最终按成功更新次数停止。启动日志和 `settings.json` 记录实际样本数、批次数、epoch预算及最终更新预算；逐步记录 `epoch`（从1开始）和 `data_epochs`（已遍历轮数，可有小数）。
+7295样本、batch=32得到每轮228批，300轮共 **68400次更新**。所有LR按成功优化器更新推进；AMP溢出重试不推进LR，会略增加实际数据遍历量。三组固定相同seed=42、11类、ignore=255、主/辅助CE权重1.0/0.4。
 
-可选覆盖参数只有常用项：`--epochs N`（清除配置中的显式 updates）、`--updates N`、`--resume 路径`、`--output 路径`、`--data-root 路径`。`--epochs` 与 `--updates` 不可同时指定。batch/累积次数/学习率等直接编辑配置。新版不再读取 `B1_UPDATES`、`B1_OUTPUT`、`B1_RESUME` 等旧环境变量；运行中的旧进程不受源码修改影响。
+旧版本没有任何LR调度器；1600轮误设不是lr恒定的直接原因。本轮是在加入调度器的同时，把旧accumulation=8改为1，因此与旧实验相比并非只改变了LR；新三组之间的超参数保持一致。
 
-续训目标仍为**累计目标**，不是追加轮数或步数。目标已经小于或等于检查点步数会报错提示，不会清空历史。续训应保持同一数据拆分、batch和accumulation；跨数据集权重迁移不能使用带采样游标的 resume。
+### 检查点与续训
 
-### 日志与 TensorBoard
+- `checkpoint.pth`：最新完整训练状态，每轮及新best时保存。
+- `best_checkpoint.pth`：开发集mIoU最高的完整状态，只由dev选取。
+- `settings.json`记录实际训练预算、模态与调度器设置；TensorBoard和metrics记录实际使用的lr、loss、epoch、验证IoU等。
+
+```bash
+CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/train.py \
+  experiments/segmentation/config/efficientvit_b1.py --single --amp --seed 42 \
+  --resume logs/segmentation/efficientvit_b1/checkpoint.pth
+```
+
+续训保留原300轮目标，不再指定“追加300轮”。恢复时校验模态、样本数、数据路径、seed、batch、accumulation以及完整LR曲线；改变这些条件或使用旧恒定LR检查点会明确报错。这样可避免学习率重置或衰减周期悄悄变化。
 
 ```bash
 ./scripts/hmnet-python -m tensorboard.main --logdir logs --host 127.0.0.1 --port 6006
 ```
 
-事件文件位于实验目录 `tensorboard/`，记录总损失、任务头分项损失、实际学习率、已遍历轮数、AMP缩放/跳过次数、显存、耗时和吞吐。分割额外记录开发集mIoU/各类IoU（0–1）。固定学习率的曲线为水平线。
-
-`metrics.jsonl` 每次更新写入；`checkpoint.pth` 每50次更新和结束时保存最新状态，没有单独的最佳模型文件。恢复时清除超过检查点的旧曲线点。已有实验默认拒绝覆盖，新实验用不同 `--output`；显式 `--overwrite` 会重建本实验历史。远程查看时在本地使用 `ssh -N -L 6006:127.0.0.1:6006 用户名@服务器`，浏览器打开 `http://localhost:6006`。
-
-数据在数据集的共享 `preprocessed/` 目录，训练产物在本工程 `logs/`，诊断历史在 `artifacts/`。`logs/` 已忽略，无新增 `!` 例外。
+三终端比较可在一个工程中将logdir改为三个工程logs路径的共同父目录。`B1_*`旧环境变量不再生效；batch等参数编辑配置，常用输出/路径可用 `--output` / `--data-root` 覆盖。
 
 ## 3. Test
 
-默认使用配置 cache 的 dev 划分及 output/checkpoint.pth：
+开发集评估最佳检查点：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/test.py \
-  experiments/segmentation/config/efficientvit_b1.py
-```
-
-评估本次正在训练的实验的最近检查点（评估时选择另一张空闲GPU）：
-
-```bash
-CUDA_VISIBLE_DEVICES=1 ./scripts/hmnet-python experiments/segmentation/scripts/test.py \
   experiments/segmentation/config/efficientvit_b1.py \
-  --output logs/segmentation/efficientvit_b1/full_100ep
+  --pretrained logs/segmentation/efficientvit_b1/best_checkpoint.pth
 ```
 
-可用 `--pretrained 路径` 显式选择任务权重；覆盖划分/缓存时使用 `test.py 配置 train或dev 共享缓存目录`。直接输出mIoU、各类IoU和混淆矩阵至实验目录 `evaluation_dev.json`，无需运行旧 `run_eval.sh`，不传 `--fast`。训练第1步、每50步及最后一步也自动验证；总损失含主/辅助CE系数1.0/0.4，TensorBoard分项为头部提供的未加权CE。
-
-
-### 官方测试集与单序列演示
-
-2026-09-19：`full_100ep` 已按要求停止，使用step=8500检查点完成评估。官方test 2809帧mIoU为59.49%，本机HMNet-B3纯事件基线为53.97%；输入模态不同。完整[评估报告](../../logs/segmentation/efficientvit_b1/full_100ep/assessment/评估与能力分析.md)与[视频页面](../../logs/segmentation/efficientvit_b1/full_100ep/assessment/index.html)保存在实验logs目录。
-
-训练缓存中的 `dev` 是留出的训练序列，不是官方测试集。需要与 HMNet 测试精度比较时，单独准备测试缓存（仅一次）：
-
-```bash
-./scripts/hmnet-python scripts/prepare_dsec_b1.py \
-  --source /home/zhaowenyao24/Conda_prj/lab_dataset/DSEC_Semantic/source \
-  --split test \
-  --assets /home/zhaowenyao24/Conda_prj/lab_dataset/DSEC_Semantic/preprocessed/dsec_b1_assets \
-  --download-assets
-```
-
-默认写入共享 `preprocessed/dsec_b1_test`，不会混入训练缓存。完整指标可用原 test 入口：
+固定训练方案后，最终评估官方测试集；不要用test选超参数：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/test.py \
   experiments/segmentation/config/efficientvit_b1.py test \
   /home/zhaowenyao24/Conda_prj/lab_dataset/DSEC_Semantic/preprocessed/dsec_b1_test \
-  --output logs/segmentation/efficientvit_b1/full_100ep
+  --pretrained logs/segmentation/efficientvit_b1/best_checkpoint.pth
 ```
 
-同时导出逐序列指标、预测和演示视频：
-
-```bash
-CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python scripts/evaluate_dsec_b1.py \
-  --checkpoint logs/segmentation/efficientvit_b1/full_100ep/checkpoint.pth \
-  --cache /home/zhaowenyao24/Conda_prj/lab_dataset/DSEC_Semantic/preprocessed/dsec_b1_test \
-  --output logs/segmentation/efficientvit_b1/full_100ep/assessment \
-  --demo-sequence zurich_city_13_a \
-  --hmnet-dir artifacts/full-eval/seg
-```
-
-`--hmnet-dir` 可省略；本机该目录是历史 HMNet-B3 纯事件官方权重预测，不是新产物目录。新增产物均位于当前实验 `assessment/`：`assessment.json`、`sequence_demo.mp4`、示例截图、逐帧预测和指标。视频使用环境中的 ffmpeg/libx264。比较按同一语义帧索引及11类标签进行；HMNet预热缺失帧同时报告“缺失计错”和“共同有预测帧”两个口径。RGB+DVS与纯事件的输入信息不同，不能据此单独归因骨干优劣。
+结果为实验目录的 `evaluation_dev.json` / `evaluation_test.json`。不指定 `--pretrained` 时仍读取最新 `checkpoint.pth`；测试 `TestSettings.batch_size=2`。三种模态均使用同一指标实现。
 
 ---
 

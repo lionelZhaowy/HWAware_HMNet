@@ -11,18 +11,24 @@ from hmnet.models.depth import HMDepth
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def build_frame_task(task, pretrained=None, mvsec=False):
+def build_frame_task(task, pretrained=None, mvsec=False, modality=None):
     if task not in ("segmentation", "detection", "depth"):
         raise ValueError(task)
     name = "hmnet_B3_yolox.py" if task == "detection" else "hmnet_B3.py"
     base = load_config(
         str(ROOT / "experiments" / task / "config" / name), f"frame_reference_{task}"
     )
-    backbone = dict(type="EfficientViTB1", fusion=task == "segmentation", pretrained=pretrained)
+    backbone = dict(
+        type="EfficientViTB1",
+        fusion=task == "segmentation",
+        pretrained=pretrained,
+        modality=modality,
+    )
     neck = copy.deepcopy(base.neck)
     # Fuse all four scales. YOLOX consumes /8,/16,/32; dense prediction uses /4.
     neck.update(
-        in_channels=[256] * 4, out_indices=[1, 2, 3] if task == "detection" else [0, 1, 2, 3]
+        in_channels=[256] * 4,
+        out_indices=[1, 2, 3] if task == "detection" else [0, 1, 2, 3],
     )
     head = copy.deepcopy(base.head)
     if task == "detection":
