@@ -23,4 +23,5 @@ onnxruntime==1.20.2
 onnxsim==0.4.36
 
 # B1 training visualization (available in the pytorch environment).
-tensorboard==2.17.0
+# 2.17.1 fixes HParams JSON serialization with protobuf >= 5.
+tensorboard==2.17.1
