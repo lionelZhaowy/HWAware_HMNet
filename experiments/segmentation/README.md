@@ -1,4 +1,4 @@
-# EfficientViT-B1 分割：300 epoch 模态对照实验
+# EfficientViT-B1 分割：150 epoch 模态对照实验
 
 本工程默认 **RGB-only**，分支 `seg_rgb_640x440_v1`。统一模型代码支持 `rgb`、`dvs`、`rgbdvs`；单模态只创建自己的编码器和投影层，不以置零输入冒充单模态训练。配置见 [efficientvit_b1.py](config/efficientvit_b1.py)。
 
@@ -53,6 +53,8 @@
 
 ## 2. Train
 
+新DSEC实验默认 **150轮（包含低学习率收尾，不是150+20）**：预热5轮，余弦衰减至 `2e-6`，共34200次更新。选择依据是已完成DVS追加阶段满足预定改善标准；旧实验的日志、检查点和300轮原始计划不改写。当前 `cooldown` 配置仍为20轮，因此修改新默认值不会改变它的恢复预算。
+
 选择空闲GPU；在三个工程分别运行以下命令即可，默认模态由各工程配置决定：
 
 ```bash
@@ -67,7 +69,7 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/t
 | 参数 | 设置与含义 |
 |---|---|
 | `modality` | 唯一的模态变量：`rgbdvs` / `rgb` / `dvs`。 |
-| `epochs` | 300个数据轮次；由实际DataLoader长度自动换算。 |
+| `epochs` | 150个数据轮次；由实际DataLoader长度自动换算。 |
 | `updates` | `None`；指定正整数时改用累计优化器更新预算。正式对照不覆盖。 |
 | `batch_size` | 32；每次前向/反向32个样本，最后不足一批保留。 |
 | `accumulation` | 1；每个有效小批次更新一次，有效batch通常32。 |
@@ -75,9 +77,9 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/t
 | `lr_schedule` | `warmup_cosine`：线性预热后余弦下降。 |
 | `warmup_epochs` | 5轮，对应1140次更新。 |
 | `warmup_start_factor` | 0.1，首次更新lr=`2e-5`，预热末尾到`2e-4`。 |
-| `min_learning_rate` | `2e-6`，300轮最后一次更新时到达。 |
+| `min_learning_rate` | `2e-6`，150轮最后一次更新时到达。 |
 | `weight_decay` | 0.01。 |
-| `workers` | 16个数据加载进程，训练和验证共用。 |
+| `workers` | 8个数据加载进程，训练和验证共用。 |
 | `prefetch_factor` | 1；每个worker预取一批，限制三实验并行时的主机内存。 |
 | `eval_every_epochs` | 1；每轮验证，另在第1次更新和结束时验证。 |
 | `eval_batch_size` | 32；控制训练中验证的显存，不影响训练batch。 |
@@ -87,7 +89,7 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/t
 | `cache` | 上述共享训练/dev缓存。 |
 | `output` | 本工程的独立logs目录。 |
 
-7295样本、batch=32得到每轮228批，300轮共 **68400次更新**。所有LR按成功优化器更新推进；AMP溢出重试不推进LR，会略增加实际数据遍历量。三组固定相同seed=42、11类、ignore=255、主/辅助CE权重1.0/0.4。
+7295样本、batch=32得到每轮228批，150轮共 **34200次更新**。所有LR按成功优化器更新推进；AMP溢出重试不推进LR，会略增加实际数据遍历量。三组固定相同seed=42、11类、ignore=255、主/辅助CE权重1.0/0.4。
 
 旧版本没有任何LR调度器；1600轮误设不是lr恒定的直接原因。本轮是在加入调度器的同时，把旧accumulation=8改为1，因此与旧实验相比并非只改变了LR；新三组之间的超参数保持一致。
 
@@ -103,7 +105,7 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/t
   --resume logs/segmentation/efficientvit_b1/checkpoint.pth
 ```
 
-续训保留原300轮目标，不再指定“追加300轮”。恢复时校验模态、样本数、数据路径、seed、batch、accumulation以及完整LR曲线；改变这些条件或使用旧恒定LR检查点会明确报错。这样可避免学习率重置或衰减周期悄悄变化。
+普通续训保留该次运行创建时的原定轮数；新训练默认150轮，不能直接用新预算恢复旧300轮计划的检查点。恢复时校验模态、样本数、数据路径、seed、batch、accumulation以及完整LR曲线；改变这些条件或使用旧恒定LR检查点会明确报错。这样可避免学习率重置或衰减周期悄悄变化。
 
 ```bash
 ./scripts/hmnet-python -m tensorboard.main --logdir logs --host 127.0.0.1 --port 6006
@@ -134,7 +136,7 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/t
 
 ## 4. 提前停止后的低学习率追加实验
 
-此阶段用于检查平台期是否受学习率影响，不修改原始300轮计划的历史记录。RGB+DVS、RGB 从约120个epoch-equivalents的完整检查点开始；DVS 因第120轮未保留检查点，经确认从约123轮开始，结果须保留该差异。
+此阶段用于检查平台期是否受学习率影响，不修改原始300轮计划的历史记录。实际起点为 RGB+DVS 119.031轮、RGB 120.031轮、DVS 123.026轮。融合组在目标停止检查点前退出，因此使用当时最新的119轮检查点；没有生成 parent_epoch120.pth，结果保留该差异。
 
 统一使用 `efficientvit_b1_cooldown.py`：**追加20轮**（4560次成功更新），lr 从 `2e-5` 余弦下降到 `2e-6`、无预热；batch=32、accumulation=1及其他设置继承同工程基线。恢复模型、AdamW动量、AMP scaler、数据游标和随机状态，仅重置阶段内更新计数与阶段最佳指标。新阶段输出必须是独立空目录；普通 `--resume` 的契约校验仍然保留。
 
@@ -142,10 +144,10 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/t
 # 新建低LR阶段；由用户手动启动。不要重复启动同一输出目录。
 CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/train.py \
   experiments/segmentation/config/efficientvit_b1_cooldown.py --single --amp --seed 42 \
-  --resume logs/segmentation/efficientvit_b1/parent_epoch120.pth
+  --resume logs/segmentation/efficientvit_b1/checkpoint.pth
 ```
 
-DVS 的输入文件为 `parent_epoch123.pth`。阶段自身续训将 `--resume` 改为 `logs/segmentation/cooldown_20ep/checkpoint.pth`，仍使用 cooldown 配置，不会再追加另一个20轮。TensorBoard step 为本阶段计数，`data_epochs` 保留从原训练累计的数据轮次；检查点的 `stage_parent` 和 `settings.json` 标明真实起点；已保存的 `baseline.json` 提供验证对照。
+本轮 RGB、DVS 保留的起点快照分别为 `parent_epoch120.pth`、`parent_epoch123.pth`；融合使用原目录 `checkpoint.pth`。阶段自身续训将 `--resume` 改为 `logs/segmentation/cooldown_20ep/checkpoint.pth`，仍使用 cooldown 配置，不会再追加另一个20轮。TensorBoard step 为本阶段计数，`data_epochs` 保留从原训练累计的数据轮次；检查点的 `stage_parent` 和 `settings.json` 标明真实起点；已保存的 `baseline.json` 提供验证对照。
 
 判断仅使用开发集：任一模态的低LR最后5轮平均mIoU比原阶段最后10次验证平均值增加至少 **0.3个百分点**，且阶段最佳mIoU超过原最佳至少 **0.1个百分点**，则将三组新DSEC实验的默认epoch统一设为150，否则设为120。该阈值用于减少单次波动造成的误判，不是统计显著性检验。由用户手动运行三组续训，结果齐全后统一分析并更新默认值；异常退出或结果不完整时不修改默认值。当前阶段实验不是对“从头训练150轮”的直接精度验证；新默认轮数仍需后续实验确认。
 
@@ -165,7 +167,7 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/t
   --resume logs/segmentation/cooldown_20ep/checkpoint.pth
 ```
 
-RGB 和 DVS 已启动过追加阶段，应在目录迁移完成后使用上述恢复命令，分别选择GPU 1、2。RGB+DVS 尚未启动追加阶段，等原训练到120轮停止、`parent_epoch120.pth` 保存后，使用前面的新建阶段命令。原始最新/最佳权重及阶段起点快照保留。其他任务的训练预算不随此实验修改。
+三个工程的追加阶段均已启动过；未完成时使用上述阶段内恢复命令，已完成4560次更新时不再执行训练命令。原始最新/最佳权重及阶段起点快照保留。其他任务的训练预算不随此实验修改。
 
 ---
 
@@ -277,6 +279,6 @@ The pre-trained weights are released under the Creative Commons BY-SA 4.0 Licens
 | hmnet_B3 | A100 (40GB) x 16 | 46.0 | 0.1685 | [github](https://github.com/hamarh/HMNet_pth/releases/download/v0.2.0/dsec_hmnet_B3.pth) | [github](https://github.com/hamarh/HMNet_pth/releases/download/v0.1.0/dsec_hmnet_B3.csv) |
 | hmnet_L3 | A100 (40GB) x 16 | 63.1 | 0.1410 | [github](https://github.com/hamarh/HMNet_pth/releases/download/v0.2.0/dsec_hmnet_L3.pth) | [github](https://github.com/hamarh/HMNet_pth/releases/download/v0.1.0/dsec_hmnet_L3.csv) |
 
-数据加载优化：三工程统一 workers=16、prefetch_factor=1、训练/验证 batch=32。验证保持 FP32；更改 worker 和验证 batch 后需重启或从 checkpoint 恢复，运行中的进程不会自动加载新配置。训练 batch、梯度累积和学习率曲线保持原值。
+数据加载优化：三工程统一 workers=8、prefetch_factor=1、训练/验证 batch=32。验证保持 FP32；更改 worker 和验证 batch 后需重启或从 checkpoint 恢复，运行中的进程不会自动加载新配置。训练 batch、梯度累积和学习率曲线保持原值。
 
 TensorBoard 兼容性：使用 `tensorboard==2.17.1`，修复 protobuf 5 下 HParams 接口的 `including_default_value_fields` 报错。升级后仅需在各 TensorBoard 终端 Ctrl+C 并重新运行原启动命令（端口保持原值），无需重启训练或删除事件文件。未安装 TensorFlow 的提示在 PyTorch 工程中可忽略。
