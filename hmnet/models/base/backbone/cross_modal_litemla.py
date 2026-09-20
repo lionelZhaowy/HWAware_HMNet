@@ -18,6 +18,8 @@ from .vendor.efficientvit.models.nn import MBConv
 
 
 class CrossModalLiteMLA(nn.Module):
+    fusion_mode = "cross_stage_muladd"
+
     def __init__(self, channels, dim=16, scales=(5,), residual_scale=0.1, eps=1e-15):
         super().__init__()
         if channels % dim:
@@ -98,7 +100,7 @@ class CrossModalLiteMLA(nn.Module):
         # restoring references avoids in-place changes to autograd-saved tensors.
         saved = []
         for module in self.modules():
-            if isinstance(module, nn.BatchNorm2d):
+            if isinstance(module, (nn.BatchNorm2d, nn.SyncBatchNorm)):
                 buffers = (module.running_mean, module.running_var, module.num_batches_tracked)
                 saved.append((module, buffers))
                 module.running_mean, module.running_var, module.num_batches_tracked = (

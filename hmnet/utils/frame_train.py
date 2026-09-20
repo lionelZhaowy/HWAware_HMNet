@@ -1,15 +1,20 @@
-"""Single-GPU independent-window training, dispatched by the existing task CLIs."""
+"""Independent-window training: FP32/BF16/FP16, single GPU or segmentation DDP."""
 
 import json
 import math
 import random
 import shutil
 from collections import defaultdict
+from contextlib import nullcontext
 import time
 from pathlib import Path
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel
+from torch.utils.data import DataLoader, RandomSampler
+from hmnet.models.base.backbone.cross_modal_litemla import CrossModalLiteMLA
+from hmnet.utils.frame_distributed import DistributedRun, GlobalBatchSampler, validate_segmentation_ddp
 from torch.utils.tensorboard import SummaryWriter
 from hmnet.dataset.custom_collate_fn import collate_keep_dict
 from hmnet.utils.common import fix_seed
@@ -40,12 +45,18 @@ def unpack(batch, task):
 
 
 @torch.no_grad()
-def evaluate_seg(model, dataset, batch_size=2, workers=0, prefetch_factor=1):
+def evaluate_seg(model, dataset, batch_size=2, workers=0, prefetch_factor=1, runtime=None):
     model.eval()
     confusion = torch.zeros(11, 11, dtype=torch.int64)
+    sampler = None
+    if runtime is not None and runtime.distributed:
+        sampler = range(runtime.rank, len(dataset), runtime.world_size)
+        batch_size = max(1, math.ceil(batch_size / runtime.world_size))
+        workers = runtime.workers(workers)
     for batch in DataLoader(
         dataset,
         batch_size=batch_size,
+        sampler=sampler,
         collate_fn=collate_keep_dict,
         num_workers=workers,
         pin_memory=True,
@@ -59,6 +70,10 @@ def evaluate_seg(model, dataset, batch_size=2, workers=0, prefetch_factor=1):
         confusion += torch.bincount(
             (gt[valid] * 11 + pred[valid]).flatten(), minlength=121
         ).reshape(11, 11)
+    if runtime is not None and runtime.distributed:
+        confusion = confusion.to(runtime.device)
+        dist.all_reduce(confusion)
+        confusion = confusion.cpu()
     union = confusion.sum(0) + confusion.sum(1) - confusion.diag()
     iou = confusion.diag().double() / union.clamp_min(1)
     return dict(
@@ -170,89 +185,82 @@ def learning_rate_at(update, schedule):
 
 
 def run(config, args):
-    if args.distributed:
-        raise ValueError(
-            "First-version frame training is single GPU; run with --single"
-        )
+    runtime = DistributedRun(args)
+    try:
+        return _run(config, args, runtime)
+    finally:
+        runtime.close()
+
+
+def _run(config, args, runtime):
+    precision = getattr(args, "precision", None) or ("fp16" if args.amp else "fp32")
+    if getattr(args, "precision", None) == "fp32" and args.amp:
+        raise ValueError("--precision fp32 cannot be combined with --amp")
+    amp = precision != "fp32"
+    amp_dtype = torch.bfloat16 if precision == "bf16" else torch.float16
+    if precision == "bf16" and not torch.cuda.is_bf16_supported():
+        raise ValueError("This GPU does not support BF16")
+    if runtime.distributed and config.task != "segmentation":
+        raise ValueError("Frame DDP is validated for segmentation only")
+    # Explicit full FP32 includes convolution/matmul: no implicit TF32 shortcut.
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
     fix_seed(args.seed)
     torch.set_num_threads(4)
     output = Path(config.output)
     output.mkdir(parents=True, exist_ok=True)
     tensorboard_dir = output / "tensorboard"
-    has_run = (
-        (output / "checkpoint.pth").exists()
-        or (output / "metrics.jsonl").exists()
-        or tensorboard_dir.exists()
-    )
+    has_run = ((output / "checkpoint.pth").exists()
+               or (output / "metrics.jsonl").exists() or tensorboard_dir.exists())
     if has_run and not config.resume and not args.overwrite:
         raise FileExistsError(f"{output}: use --output, --resume, or --overwrite")
     dataset = config.get_dataset()
-    # Seed each epoch explicitly. Resume checkpoints include the epoch/batch cursor
-    # and random states, so an optimizer update never resumes midway through accumulation.
     generator = torch.Generator()
+    sampler = GlobalBatchSampler(
+        RandomSampler(dataset, generator=generator), config.batch_size,
+        runtime.rank, runtime.world_size,
+    )
+    workers = runtime.workers(config.workers)
     loader = DataLoader(
-        dataset,
-        batch_size=config.batch_size,
-        shuffle=True,
-        num_workers=config.workers,
-        # Bound host memory when several modality experiments run together.
-        **(
-            {"prefetch_factor": getattr(config, "prefetch_factor", 1)}
-            if config.workers > 0
-            else {}
-        ),
-        generator=generator,
-        collate_fn=collate_keep_dict,
-        pin_memory=True,
-        drop_last=False,
-        # DSEC workers must receive the new epoch for reproducible augmentation.
-        persistent_workers=config.workers > 0 and not hasattr(dataset, "set_epoch"),
+        dataset, batch_sampler=sampler, num_workers=workers,
+        **({"prefetch_factor": getattr(config, "prefetch_factor", 1)} if workers else {}),
+        generator=generator, collate_fn=collate_keep_dict, pin_memory=True,
+        persistent_workers=workers > 0 and not hasattr(dataset, "set_epoch"),
     )
     max_updates = resolve_training_updates(config, len(loader))
     schedule = training_schedule(config, len(loader), max_updates)
     eval_every = getattr(config, "eval_every_epochs", None)
     if eval_every is not None and eval_every <= 0:
         raise ValueError("eval_every_epochs must be positive")
-    eval_interval = (
-        max(1, math.ceil(len(loader) * eval_every / config.accumulation))
-        if eval_every is not None
-        else 50
-    )
-    # Changing these during resume would invalidate data order or the LR curve.
+    eval_interval = (max(1, math.ceil(len(loader) * eval_every / config.accumulation))
+                     if eval_every is not None else 50)
+    fusion_mode = (CrossModalLiteMLA.fusion_mode
+                   if getattr(config, "modality", "dvs") == "rgbdvs" else "none")
     contract = dict(
-        schedule=schedule,
-        modality=getattr(config, "modality", "dvs"),
-        fusion_mode=("cross_stage_muladd" if getattr(config, "modality", "dvs") == "rgbdvs" else "none"),
-        batch_size=config.batch_size,
-        accumulation=config.accumulation,
-        train_samples=len(dataset),
-        weight_decay=config.weight_decay,
-        amp=args.amp,
+        schedule=schedule, modality=getattr(config, "modality", "dvs"),
+        fusion_mode=fusion_mode, batch_size=config.batch_size,
+        accumulation=config.accumulation, train_samples=len(dataset),
+        weight_decay=config.weight_decay, amp=amp, precision=precision,
+        world_size=runtime.world_size, sync_bn=runtime.distributed, tf32=False,
         seed=args.seed,
         data_root=str(getattr(config, "cache", getattr(config, "data_root", ""))),
     )
-    print(
-        json.dumps(
-            dict(
-                train_samples=len(dataset),
-                batches_per_epoch=len(loader),
-                epochs=getattr(config, "epochs", None),
-                requested_updates=config.updates,
-                resolved_updates=max_updates,
-                schedule=schedule,
-                modality=getattr(config, "modality", "dvs"),
-                fusion_mode=("cross_stage_muladd" if getattr(config, "modality", "dvs") == "rgbdvs" else "none"),
-                batch_size=config.batch_size,
-                accumulation=config.accumulation,
-            )
-        ),
-        flush=True,
-    )
-    model = config.get_model().cuda()
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay
-    )
-    scaler = torch.amp.GradScaler("cuda", enabled=args.amp, init_scale=1024.0)
+    if runtime.primary:
+        print(json.dumps(dict(training_contract=contract, batches_per_epoch=len(loader),
+                              resolved_updates=max_updates, local_batch=config.batch_size // runtime.world_size)), flush=True)
+    raw_model = config.get_model().to(runtime.device)
+    if runtime.distributed:
+        validate_segmentation_ddp(raw_model)
+        raw_model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(raw_model)
+        model = DistributedDataParallel(raw_model, device_ids=[runtime.local_rank],
+                                        broadcast_buffers=False)
+    else:
+        model = raw_model
+    # Distinct dropout streams, reproducible via per-rank checkpoint RNG.
+    fix_seed(args.seed + runtime.rank)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate,
+                                  weight_decay=config.weight_decay)
+    scaler = torch.amp.GradScaler("cuda", enabled=precision == "fp16", init_scale=1024.0)
     step, epoch, cursor = 0, 0, 0
     best_miou, best_step = -1.0, 0
     stage_parent = None
@@ -260,110 +268,59 @@ def run(config, args):
         raise ValueError("A new training stage requires --resume with a full checkpoint")
     if config.resume:
         ckpt = torch.load(config.resume, map_location="cpu", weights_only=False)
-        # RGB+DVS checkpoints must explicitly identify the current architecture.
         previous = dict(ckpt.get("training_contract", {}))
-        if previous.get("modality") != "rgbdvs":
-            previous["fusion_mode"] = "none"
         if previous.get("fusion_mode") != contract["fusion_mode"]:
             raise ValueError("Resume fusion architecture differs; start a new experiment")
-        # A new stage explicitly changes the LR budget but retains the optimizer,
-        # sampling cursor and RNG. Ordinary resume still checks the full contract.
         new_stage = getattr(config, "start_new_stage", False) and not ckpt.get("stage_parent")
+        expected = {k: v for k, v in contract.items() if not new_stage or k != "schedule"}
+        actual = {k: v for k, v in previous.items() if not new_stage or k != "schedule"}
+        if actual != expected:
+            raise ValueError("Resume training contract differs (precision/world size/BN/data/batch/seed/LR); start a separate experiment")
         if new_stage:
             if output.resolve() == Path(config.resume).resolve().parent or has_run:
                 raise ValueError("A new stage requires a separate, empty output directory")
-            if {k: v for k, v in previous.items() if k != "schedule"} != {
-                k: v for k, v in contract.items() if k != "schedule"
-            }:
-                raise ValueError("New stage may change LR/budget only; data and training settings must match")
-            stage_parent = dict(
-                checkpoint=str(Path(config.resume).resolve()),
-                step=ckpt["step"],
-                data_epoch=ckpt["data_epoch"],
-                data_cursor=ckpt["data_cursor"],
-                training_contract=previous,
-                best_miou=ckpt.get("best_miou"),
-                best_step=ckpt.get("best_step"),
-            )
-        elif schedule["kind"] != "constant" and previous != contract:
-            raise ValueError(
-                "Resume training contract differs (modality/data/batch/seed/LR budget). "
-                "Use the original settings; old constant-LR runs are separate experiments."
-            )
-        best_miou = ckpt.get("best_miou", -1.0)
-        best_step = ckpt.get("best_step", 0)
-        model.load_state_dict(ckpt["state_dict"], strict=True)
+            stage_parent = dict(checkpoint=str(Path(config.resume).resolve()),
+                                step=ckpt["step"], data_epoch=ckpt["data_epoch"],
+                                data_cursor=ckpt["data_cursor"], training_contract=previous,
+                                best_miou=ckpt.get("best_miou"), best_step=ckpt.get("best_step"))
+        else:
+            stage_parent = ckpt.get("stage_parent")
+        raw_model.load_state_dict(ckpt["state_dict"], strict=True)
         optimizer.load_state_dict(ckpt["optimizer"])
         scaler.load_state_dict(ckpt["scaler"])
         step, epoch, cursor = ckpt["step"], ckpt["data_epoch"], ckpt["data_cursor"]
-        random.setstate(ckpt["python_rng"])
-        np.random.set_state(ckpt["numpy_rng"])
-        torch.set_rng_state(ckpt["torch_rng"])
-        torch.cuda.set_rng_state_all(ckpt["cuda_rng"])
+        best_miou, best_step = ckpt.get("best_miou", -1.), ckpt.get("best_step", 0)
+        runtime.restore_rng(ckpt["rng_by_rank"])
         if new_stage:
-            # Local steps measure the additional stage, not the total data epochs.
-            # The historical best remains in the parent run; select a new stage best.
-            step, best_miou, best_step = 0, -1.0, 0
-        else:
-            stage_parent = ckpt.get("stage_parent")
+            step, best_miou, best_step = 0, -1., 0
         del ckpt
     if step >= max_updates:
-        raise ValueError(
-            f"Checkpoint already has {step} updates; target is {max_updates}. "
-            "Increase total --epochs/--updates to continue, or run test.py."
-        )
-    validation = (
-        config.get_validation_dataset()
-        if hasattr(config, "get_validation_dataset")
-        else None
-    )
+        raise ValueError(f"Checkpoint already has {step} updates; target is {max_updates}")
+    validation = config.get_validation_dataset() if hasattr(config, "get_validation_dataset") else None
     history = output / "metrics.jsonl"
-    if config.resume and history.exists():
-        # A crash can leave metrics newer than the last saved optimizer update.
-        # Keep JSON history aligned with TensorBoard's purge_step on continuation.
-        rows = [
-            json.loads(line)
-            for line in history.read_text().splitlines()
-            if line.strip()
-        ]
-        history.write_text(
-            "".join(json.dumps(row) + "\n" for row in rows if row["step"] <= step)
-        )
-    elif not config.resume:
-        history.write_text("")
-        if tensorboard_dir.exists():
-            # Only reached after the caller explicitly requested --overwrite.
-            shutil.rmtree(tensorboard_dir)
-    (output / "settings.json").write_text(
-        json.dumps(
-            dict(
-                seed=args.seed,
-                task=config.task,
-                updates=max_updates,
-                requested_updates=config.updates,
-                epochs=getattr(config, "epochs", None),
-                batches_per_epoch=len(loader),
-                batch=config.batch_size,
-                accumulation=config.accumulation,
-                lr=config.learning_rate,
-                lr_schedule=schedule,
-                modality=getattr(config, "modality", "dvs"),
-                fusion_mode=("cross_stage_muladd" if getattr(config, "modality", "dvs") == "rgbdvs" else "none"),
-                eval_interval_updates=eval_interval,
-                weight_decay=config.weight_decay,
-                amp=args.amp,
-                data_root=str(
-                    getattr(config, "cache", getattr(config, "data_root", ""))
-                ),
-                train_samples=len(dataset),
-                dev_samples=len(validation) if validation else 0,
-                tensorboard_dir=str(tensorboard_dir),
-                resume=config.resume,
-                stage_parent=stage_parent,
-            ),
-            indent=2,
-        )
-    )
+    if runtime.primary:
+        if config.resume and history.exists():
+            rows = [json.loads(line) for line in history.read_text().splitlines() if line.strip()]
+            history.write_text("".join(json.dumps(row) + "\n" for row in rows if row["step"] <= step))
+        elif not config.resume:
+            history.write_text("")
+            if tensorboard_dir.exists():
+                shutil.rmtree(tensorboard_dir)
+        (output / "settings.json").write_text(json.dumps(dict(
+            seed=args.seed, task=config.task, updates=max_updates,
+            requested_updates=config.updates, epochs=getattr(config, "epochs", None),
+            batches_per_epoch=len(loader), batch=config.batch_size,
+            local_batch=config.batch_size // runtime.world_size,
+            workers=config.workers, accumulation=config.accumulation,
+            lr=config.learning_rate, lr_schedule=schedule, modality=contract["modality"],
+            fusion_mode=fusion_mode, eval_interval_updates=eval_interval,
+            weight_decay=config.weight_decay, amp=amp, precision=precision,
+            world_size=runtime.world_size, sync_bn=runtime.distributed, tf32=False,
+            training_contract=contract, data_root=contract["data_root"],
+            train_samples=len(dataset), dev_samples=len(validation) if validation else 0,
+            tensorboard_dir=str(tensorboard_dir), resume=config.resume, stage_parent=stage_parent,
+        ), indent=2))
+    runtime.barrier()
 
     def batches(start_epoch, start_cursor):
         data_epoch = start_epoch
@@ -380,131 +337,114 @@ def run(config, args):
     iterator = batches(epoch, cursor)
     torch.cuda.reset_peak_memory_stats()
     amp_skipped_updates = 0
-    # Use optimizer updates as the x-axis, not microbatches. Purging after resume
-    # hides stale points beyond the checkpoint; context exit flushes on exceptions.
-    with SummaryWriter(
-        str(tensorboard_dir),
-        purge_step=step + 1 if config.resume else None,
-        flush_secs=30,
-    ) as writer:
+    writer_context = (SummaryWriter(str(tensorboard_dir), purge_step=step+1 if config.resume else None,
+                                    flush_secs=30) if runtime.primary else nullcontext(None))
+    with writer_context as writer:
         while step < max_updates:
-            # Apply BEFORE optimizer.step: the logged LR is the one actually used.
             lr = learning_rate_at(step + 1, schedule)
             for group in optimizer.param_groups:
                 group["lr"] = lr
             model.train()
             optimizer.zero_grad(set_to_none=True)
             started = time.perf_counter()
-            loss_sum, samples, accepted, attempts = 0.0, 0, 0, 0
+            loss_sum, samples, accepted, attempts = 0., 0, 0, 0
             component_sums = defaultdict(float)
             while accepted < config.accumulation:
                 batch, epoch, cursor = next(iterator)
                 attempts += 1
-                if attempts > max(len(loader) * 2, config.accumulation * 4):
-                    raise RuntimeError(
-                        "No sufficient supervised windows: check labels and depth ranges"
-                    )
-                with torch.amp.autocast("cuda", enabled=args.amp):
+                if attempts > max(len(loader)*2, config.accumulation*4):
+                    raise RuntimeError("No sufficient supervised windows: check labels and depth ranges")
+                weight = 1.
+                if runtime.distributed:
+                    pixels = sum(int((target["labels"] != 255).sum()) for target in batch[1])
+                    total_pixels = runtime.reduce([pixels])[0]
+                    if total_pixels == 0:
+                        continue
+                    # Avoid a rank skipping forward while its peers enter SyncBN.
+                    if not runtime.all_true(pixels > 0):
+                        raise ValueError("DDP batch has a rank with no valid labels; use fewer GPUs")
+                    weight = runtime.world_size * pixels / total_pixels
+                with torch.amp.autocast("cuda", enabled=amp, dtype=amp_dtype):
                     result = model(*unpack(batch, config.task))
                     loss = result["loss"]
                 if result.get("skip_step", False):
                     continue
-                if not torch.isfinite(loss):
-                    raise FloatingPointError(f"Non-finite loss at update {step}")
-                scaler.scale(loss / config.accumulation).backward()
-                loss_sum += float(loss.detach())
+                if not runtime.all_true(bool(torch.isfinite(loss))):
+                    raise FloatingPointError(f"Non-finite {precision} loss at update {step}")
+                scaler.scale(loss * weight / config.accumulation).backward()
+                loss_sum += float(loss.detach()) * weight
                 for name, value in result.get("log_vars", {}).items():
-                    component_sums[name] += float(value)
+                    component_sums[name] += float(value) * weight
                 samples += result["num_samples"]
                 accepted += 1
             scaler.unscale_(optimizer)
-            if not all(
-                p.grad is None or torch.isfinite(p.grad).all()
-                for p in model.parameters()
-            ):
-                if args.amp:
+            finite = all(p.grad is None or torch.isfinite(p.grad).all() for p in model.parameters())
+            if not runtime.all_true(bool(finite)):
+                if precision == "fp16":
                     scaler.step(optimizer)
                     scaler.update()
                     amp_skipped_updates += 1
-                    print("AMP overflow: skipped update, reduced scale", flush=True)
+                    if runtime.primary:
+                        print("AMP overflow: skipped update, reduced scale", flush=True)
                     continue
-                raise FloatingPointError("Non-finite FP32 gradient")
+                raise FloatingPointError(f"Non-finite {precision} gradient")
             scaler.step(optimizer)
             scaler.update()
             step += 1
             torch.cuda.synchronize()
-            seconds = time.perf_counter() - started
+            seconds = runtime.reduce([time.perf_counter()-started], dist.ReduceOp.MAX)[0]
+            names = sorted(component_sums)
+            sums = runtime.reduce([loss_sum, samples] + [component_sums[name] for name in names])
             record = dict(
-                step=step,
-                epoch=epoch + 1,
-                data_epochs=epoch + cursor / len(loader),
-                stage_epochs=step * config.accumulation / len(loader),
-                loss=loss_sum / accepted,
-                seconds=seconds,
-                lr=optimizer.param_groups[0]["lr"],
-                learning_rates=[group["lr"] for group in optimizer.param_groups],
-                loss_components={
-                    name: value / accepted for name, value in component_sums.items()
-                },
-                amp_scale=scaler.get_scale(),
-                amp_skipped_updates=amp_skipped_updates,
-                samples_per_second=samples / seconds,
-                peak_memory_mib=torch.cuda.max_memory_allocated() / 2**20,
+                step=step, epoch=epoch+1, data_epochs=epoch+cursor/len(loader),
+                stage_epochs=step*config.accumulation/len(loader),
+                loss=sums[0]/runtime.world_size/accepted, seconds=seconds,
+                lr=lr, learning_rates=[group["lr"] for group in optimizer.param_groups],
+                loss_components={name: value/runtime.world_size/accepted for name, value in zip(names, sums[2:])},
+                amp_scale=scaler.get_scale(), amp_skipped_updates=amp_skipped_updates,
+                samples_per_second=sums[1]/seconds, samples=int(sums[1]),
+                peak_memory_mib=runtime.reduce([torch.cuda.max_memory_allocated()/2**20], dist.ReduceOp.MAX)[0],
             )
             is_best = False
-            if validation is not None and (
-                step == 1 or step % eval_interval == 0 or step == max_updates
-            ):
+            if validation is not None and (step == 1 or step % eval_interval == 0 or step == max_updates):
                 record["dev"] = evaluate_seg(
-                    model,
-                    validation,
-                    getattr(config, "eval_batch_size", config.batch_size),
-                    workers=getattr(config, "workers", 0),
-                    prefetch_factor=getattr(config, "prefetch_factor", 1),
-                )
+                    raw_model, validation, getattr(config, "eval_batch_size", config.batch_size),
+                    workers=config.workers, prefetch_factor=getattr(config, "prefetch_factor", 1), runtime=runtime)
                 is_best = record["dev"]["miou"] > best_miou
                 if is_best:
                     best_miou, best_step = record["dev"]["miou"], step
                 record.update(best_miou=best_miou, best_step=best_step)
                 if getattr(config, "overfit", 0):
                     record["fixed_train"] = evaluate_seg(
-                        model,
-                        dataset,
-                        config.batch_size,
-                        workers=getattr(config, "workers", 0),
-                        prefetch_factor=getattr(config, "prefetch_factor", 1),
+                        raw_model, dataset, config.batch_size, workers=config.workers,
+                        prefetch_factor=getattr(config, "prefetch_factor", 1), runtime=runtime)
+            if runtime.primary:
+                with history.open("a") as f:
+                    f.write(json.dumps(record) + "\n")
+                write_tensorboard(writer, record)
+                print(json.dumps(record), flush=True)
+            if (is_best or step % eval_interval == 0 or step == max_updates
+                    or (getattr(args, "stop_after", None) is not None and step >= args.stop_after)):
+                rng_by_rank = runtime.gather_rng()
+                if runtime.primary:
+                    checkpoint = dict(
+                        state_dict=raw_model.state_dict(), training_contract=contract,
+                        stage_parent=stage_parent, best_miou=best_miou, best_step=best_step,
+                        optimizer=optimizer.state_dict(), scaler=scaler.state_dict(), step=step,
+                        data_epoch=epoch, data_cursor=cursor, rng_by_rank=rng_by_rank,
                     )
-            with history.open("a") as f:
-                f.write(json.dumps(record) + "\n")
-            write_tensorboard(writer, record)
-            print(json.dumps(record), flush=True)
-            if is_best or step % eval_interval == 0 or step == max_updates:
-                checkpoint = dict(
-                    state_dict=model.state_dict(),
-                    training_contract=contract,
-                    stage_parent=stage_parent,
-                    best_miou=best_miou,
-                    best_step=best_step,
-                    optimizer=optimizer.state_dict(),
-                    scaler=scaler.state_dict(),
-                    step=step,
-                    data_epoch=epoch,
-                    data_cursor=cursor,
-                    python_rng=random.getstate(),
-                    numpy_rng=np.random.get_state(),
-                    torch_rng=torch.get_rng_state(),
-                    cuda_rng=torch.cuda.get_rng_state_all(),
-                )
-                temp = output / "checkpoint.tmp.pth"
-                torch.save(checkpoint, temp)
-                temp.replace(output / "checkpoint.pth")
-                if is_best:
-                    # Keep a full resume-able best checkpoint, chosen only on dev.
-                    best_temp = output / "best_checkpoint.tmp.pth"
-                    shutil.copyfile(output / "checkpoint.pth", best_temp)
-                    best_temp.replace(output / "best_checkpoint.pth")
-                writer.flush()
-    return model
+                    temp = output / "checkpoint.tmp.pth"
+                    torch.save(checkpoint, temp)
+                    temp.replace(output / "checkpoint.pth")
+                    if is_best:
+                        shutil.copyfile(output / "checkpoint.pth", output / "best_checkpoint.tmp.pth")
+                        (output / "best_checkpoint.tmp.pth").replace(output / "best_checkpoint.pth")
+                    writer.flush()
+                runtime.barrier()
+            # Optional bounded diagnostics stop without changing the LR budget.
+            if getattr(args, "stop_after", None) is not None and step >= args.stop_after:
+                break
+    return raw_model
 
 
 def run_seg_evaluation(config, args):

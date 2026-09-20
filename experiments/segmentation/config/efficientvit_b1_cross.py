@@ -1,4 +1,4 @@
-"""Alternate name retained for running experiment-C jobs; the main config is B1."""
+"""Alias of the current main B1 config; not an old-architecture selector."""
 
 from pathlib import Path
 from hmnet.utils.config import load_config
