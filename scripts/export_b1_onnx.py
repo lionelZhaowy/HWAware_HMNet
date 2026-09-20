@@ -127,7 +127,7 @@ def export(args):
             np.testing.assert_allclose(values[0][j], values[1][j], atol=1e-5, rtol=1e-4)
     report = dict(
         task=args.task,
-        fusion_mode="cross_stage" if task == "segmentation" else "none",
+        fusion_mode="cross_stage_muladd" if task == "segmentation" else "none",
         checkpoint=args.checkpoint,
         checkpoint_sha256=hashlib.sha256(Path(args.checkpoint).read_bytes()).hexdigest(),
         shape=[h, w],

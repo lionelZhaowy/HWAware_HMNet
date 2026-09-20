@@ -1,3 +1,31 @@
+# v2.0：融合入口 Mul + Add 对照实验
+
+本分支 `seg_rgbdvs_640x440_v2.0` 基于 `main/c573491`。唯一模型计算变化是在四个stage的原融合入口增加逐元素乘加（不是矩阵乘法）：
+
+```text
+P = R ⊙ D                # 原始同尺度 [B,C,H,W] 特征，共用同一个 P
+R_enh = R + P
+D_enh = D + P
+(R_next, D_next, O) = 原融合模块(R_enh, D_enh)
+```
+
+保留前置IRB＋Concat更新及全部原注意力归一化、参数和后续连接；不额外添加论文图中的卷积或其他模块。参数量不变。数据、预训练、seed42、150epoch、batch32、accumulation1、workers8和学习率日程均与来源版本相同。
+
+原训练入口如下（**当前FP16 AMP冒烟失败，暂勿启动**；BF16诊断通过，但训练精度变更尚待确认）：
+
+```bash
+CUDA_VISIBLE_DEVICES=2 ./scripts/hmnet-python experiments/segmentation/scripts/train.py \
+  experiments/segmentation/config/efficientvit_b1.py --single --amp --seed 42
+```
+
+新输出为 `logs/segmentation/efficientvit_b1_cross_v20/`，`fusion_mode=cross_stage_muladd`。仅允许从本实验自己的检查点resume；旧版本参数键和形状虽相同，计算语义已改变，不能作为本实验续训或评估。训练契约会拒绝旧fusion_mode；评估/导出仍需明确选择本版本训练所得权重，单靠strict加载不能区分此无参数变更。
+
+新增乘加的结构/梯度/BN回归通过；真实440×640 FP32小批次更新通过，FP16 batch32出现前向溢出。BF16诊断两步batch32更新、FP32 batch32推理及严格保存恢复通过，但这不代表原FP16命令可用。证据保存在本地 `logs/segmentation/muladd_validation/`。尚未正式训练、评估精度或验收部署。
+
+下文保留来源版本说明、历史验证与命令供参照；其中旧输出路径、显存/精度/ONNX结论均属于来源版本，不代表本乘加实验已验收。当前实验以本节路径与命令为准。
+
+---
+
 # EfficientViT-B1 分割：方案 C
 
 当前RGB+DVS使用**标准归一化LiteMLA双分支阶段交互**。主配置为 [efficientvit_b1.py](config/efficientvit_b1.py)。旧相加融合实现和旧cooldown配置已移除；历史模型请在备份工程中使用。`efficientvit_b1_cross.py` 仅是主配置的别名，保留给已经启动的方案C任务，二者模型和参数完全相同。
