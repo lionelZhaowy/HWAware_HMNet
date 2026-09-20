@@ -132,6 +132,25 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/t
 
 结果为实验目录的 `evaluation_dev.json` / `evaluation_test.json`。不指定 `--pretrained` 时仍读取最新 `checkpoint.pth`；测试 `TestSettings.batch_size=32`。三种模态均使用同一指标实现。
 
+## 4. 提前停止后的低学习率追加实验
+
+此阶段用于检查平台期是否受学习率影响，不修改原始300轮计划的历史记录。RGB+DVS、RGB 从约120个epoch-equivalents的完整检查点开始；DVS 因第120轮未保留检查点，经确认从约123轮开始，结果须保留该差异。
+
+统一使用 `efficientvit_b1_cooldown.py`：**追加20轮**（4560次成功更新），lr 从 `2e-5` 余弦下降到 `2e-6`、无预热；batch=32、accumulation=1及其他设置继承同工程基线。恢复模型、AdamW动量、AMP scaler、数据游标和随机状态，仅重置阶段内更新计数与阶段最佳指标。新阶段输出必须是独立空目录；普通 `--resume` 的契约校验仍然保留。
+
+```bash
+# 在实验管理器未启动该阶段时手动使用；不要重复启动同一输出目录。
+CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/train.py \
+  experiments/segmentation/config/efficientvit_b1_cooldown.py --single --amp --seed 42 \
+  --resume logs/segmentation/efficientvit_b1/parent_epoch120.pth
+```
+
+DVS 的输入文件为 `parent_epoch123.pth`。阶段自身续训将 `--resume` 改为 `logs/segmentation/efficientvit_b1/cooldown_20ep/checkpoint.pth`，仍使用 cooldown 配置，不会再追加另一个20轮。TensorBoard step 为本阶段计数，`data_epochs` 保留从原训练累计的数据轮次；控制脚本保存的 `baseline.json` 标明真实起点。
+
+判断仅使用开发集：任一模态的低LR最后5轮平均mIoU比原阶段最后10次验证平均值增加至少 **0.3个百分点**，且阶段最佳mIoU超过原最佳至少 **0.1个百分点**，则将三组新DSEC实验的默认epoch统一设为150，否则设为120。该阈值用于减少单次波动造成的误判，不是统计显著性检验。异常退出或结果不完整时不自动修改默认值。当前阶段实验不是对“从头训练150轮”的直接精度验证；新默认轮数仍需后续实验确认。
+
+训练、检查点和结果在 `logs/segmentation/efficientvit_b1/cooldown_20ep/`，原始最新/最佳权重及阶段起点快照保留。其他任务的训练预算不随此实验修改。
+
 ---
 
 # 原 HMNet 使用说明

@@ -253,9 +253,32 @@ def run(config, args):
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp, init_scale=1024.0)
     step, epoch, cursor = 0, 0, 0
     best_miou, best_step = -1.0, 0
+    stage_parent = None
+    if getattr(config, "start_new_stage", False) and not config.resume:
+        raise ValueError("A new training stage requires --resume with a full checkpoint")
     if config.resume:
         ckpt = torch.load(config.resume, map_location="cpu", weights_only=False)
-        if schedule["kind"] != "constant" and ckpt.get("training_contract") != contract:
+        # A new stage explicitly changes the LR budget but retains the optimizer,
+        # sampling cursor and RNG. Ordinary resume still checks the full contract.
+        new_stage = getattr(config, "start_new_stage", False) and not ckpt.get("stage_parent")
+        if new_stage:
+            if output.resolve() == Path(config.resume).resolve().parent or has_run:
+                raise ValueError("A new stage requires a separate, empty output directory")
+            previous = ckpt.get("training_contract", {})
+            if {k: v for k, v in previous.items() if k != "schedule"} != {
+                k: v for k, v in contract.items() if k != "schedule"
+            }:
+                raise ValueError("New stage may change LR/budget only; data and training settings must match")
+            stage_parent = dict(
+                checkpoint=str(Path(config.resume).resolve()),
+                step=ckpt["step"],
+                data_epoch=ckpt["data_epoch"],
+                data_cursor=ckpt["data_cursor"],
+                training_contract=previous,
+                best_miou=ckpt.get("best_miou"),
+                best_step=ckpt.get("best_step"),
+            )
+        elif schedule["kind"] != "constant" and ckpt.get("training_contract") != contract:
             raise ValueError(
                 "Resume training contract differs (modality/data/batch/seed/LR budget). "
                 "Use the original settings; old constant-LR runs are separate experiments."
@@ -270,6 +293,13 @@ def run(config, args):
         np.random.set_state(ckpt["numpy_rng"])
         torch.set_rng_state(ckpt["torch_rng"])
         torch.cuda.set_rng_state_all(ckpt["cuda_rng"])
+        if new_stage:
+            # Local steps measure the additional stage, not the total data epochs.
+            # The historical best remains in the parent run; select a new stage best.
+            step, best_miou, best_step = 0, -1.0, 0
+        else:
+            stage_parent = ckpt.get("stage_parent")
+        del ckpt
     if step >= max_updates:
         raise ValueError(
             f"Checkpoint already has {step} updates; target is {max_updates}. "
@@ -321,6 +351,7 @@ def run(config, args):
                 dev_samples=len(validation) if validation else 0,
                 tensorboard_dir=str(tensorboard_dir),
                 resume=config.resume,
+                stage_parent=stage_parent,
             ),
             indent=2,
         )
@@ -399,6 +430,7 @@ def run(config, args):
                 step=step,
                 epoch=epoch + 1,
                 data_epochs=epoch + cursor / len(loader),
+                stage_epochs=step * config.accumulation / len(loader),
                 loss=loss_sum / accepted,
                 seconds=seconds,
                 lr=optimizer.param_groups[0]["lr"],
@@ -442,6 +474,7 @@ def run(config, args):
                 checkpoint = dict(
                     state_dict=model.state_dict(),
                     training_contract=contract,
+                    stage_parent=stage_parent,
                     best_miou=best_miou,
                     best_step=best_step,
                     optimizer=optimizer.state_dict(),
