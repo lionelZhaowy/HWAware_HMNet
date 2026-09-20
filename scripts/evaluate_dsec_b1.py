@@ -11,6 +11,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
+from hmnet.models.base.backbone.cross_modal_litemla import CrossModalLiteMLA
 from torch.utils.data import DataLoader
 from hmnet.dataset.dsec_frames import DSECFrames
 from hmnet.dataset.custom_collate_fn import collate_keep_dict
@@ -312,7 +313,7 @@ def main(args):
         classes=NAMES,
         precision="FP32",
         modality=cfg.modality,
-        fusion_mode="cross_stage_post_mbconv_muladd" if cfg.modality == "rgbdvs" else "none",
+        fusion_mode=CrossModalLiteMLA.fusion_mode if cfg.modality == "rgbdvs" else "none",
         parameters=sum(p.numel() for p in model.parameters()),
         evaluated=metrics(sum(cs.values())),
         sequences={s: dict(frames=counts[s], **metrics(cs[s])) for s in seqs},

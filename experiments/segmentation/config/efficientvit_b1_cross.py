@@ -1,4 +1,4 @@
-"""Alternate name for the current v2.1 config; not an old-architecture selector."""
+"""Alias of the current main B1 config; not an old-architecture selector."""
 
 from pathlib import Path
 from hmnet.utils.config import load_config

@@ -1,28 +1,23 @@
 # v2.2：融合入口 Mul + Add 对照实验
 
-本分支 `seg_rgbdvs_640x440_v2.2` 基于 `v2.1/d8037a8`。唯一模型计算变化是在四个stage的原融合入口增加逐元素乘加（不是矩阵乘法）：
+分支 `seg_rgbdvs_640x440_v2.2` 基于 `v2.1/d8037a8`。四个stage在原融合模块入口加入逐元素乘加：
 
 ```text
-P = R ⊙ D                # 原始同尺度 [B,C,H,W] 特征，共用同一个 P
+P = R ⊙ D  # 两路同尺度 [B,C,H,W]，使用同一个原始输入乘积
 R_enh = R + P
 D_enh = D + P
 (R_next, D_next, O) = 原融合模块(R_enh, D_enh)
 ```
 
-保留直接QKV＋注意力投影残差＋后置MBConv残差及全部原注意力归一化、参数和后续连接；不额外添加论文图中的卷积或其他模块。参数量不变。数据、预训练、seed42、150epoch、batch32、accumulation1、workers8和学习率日程均与来源版本相同。
+保留直接QKV＋注意力投影残差＋后置MBConv残差及注意力归一化和参数。支持 **BF16单卡 / FP32多卡**，与另一新实验使用相同公共训练代码。全部启动、续训、评估命令和精度说明见 **[训练精度与多卡说明](TRAINING_PRECISION.md)**。
 
-原训练入口如下（**当前FP16 AMP冒烟失败，暂勿启动**；BF16诊断通过，但训练精度变更尚待确认）：
+- BF16输出：`logs/segmentation/efficientvit_b1_cross_v22_bf16/`。
+- FP32双卡输出：`logs/segmentation/efficientvit_b1_cross_v22_fp32_ddp2/`。
+- 两者都保持150epoch、全局batch32、accumulation1、workers8和原学习率日程。
+- 已验证两种入口的真实样本更新；此前溢出的是FP16，原 `--amp` 命令不适用。不能resume旧结构或不同精度/卡数的检查点。
+- 尚未正式长训或比较最终精度。
 
-```bash
-CUDA_VISIBLE_DEVICES=3 ./scripts/hmnet-python experiments/segmentation/scripts/train.py \
-  experiments/segmentation/config/efficientvit_b1.py --single --amp --seed 42
-```
-
-新输出为 `logs/segmentation/efficientvit_b1_cross_v22/`，`fusion_mode=cross_stage_post_mbconv_muladd`。仅允许从本实验自己的检查点resume；旧版本参数键和形状虽相同，计算语义已改变，不能作为本实验续训或评估。训练契约会拒绝旧fusion_mode；评估/导出仍需明确选择本版本训练所得权重，单靠strict加载不能区分此无参数变更。
-
-新增乘加的结构/梯度/BN回归通过；真实440×640 FP32小批次更新通过，FP16 batch32出现前向溢出。BF16诊断两步batch32更新、FP32 batch32推理及严格保存恢复通过，但这不代表原FP16命令可用。证据保存在本地 `logs/segmentation/muladd_validation/`。尚未正式训练、评估精度或验收部署。
-
-下文保留来源版本说明、历史验证与命令供参照；其中旧输出路径、显存/精度/ONNX结论均属于来源版本，不代表本乘加实验已验收。当前实验以本节路径与命令为准。
+下文保留来源版本说明及历史命令；其中旧输出、显存、精度、ONNX结论属于来源版本。**本实验启动请使用上方链接的新命令。**
 
 ---
 

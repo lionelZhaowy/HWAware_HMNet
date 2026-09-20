@@ -10,6 +10,7 @@ import onnx
 import onnxruntime as ort
 from onnxsim import simplify
 import torch
+from hmnet.models.base.backbone.cross_modal_litemla import CrossModalLiteMLA
 from hmnet.models.efficientvit_tasks import build_frame_task
 
 
@@ -151,7 +152,7 @@ def export(args):
         failures=failures,
         sample=args.sample,
         task=args.task,
-        fusion_mode="cross_stage_post_mbconv_muladd" if task == "segmentation" else "none",
+        fusion_mode=CrossModalLiteMLA.fusion_mode if task == "segmentation" else "none",
         checkpoint=args.checkpoint,
         checkpoint_sha256=hashlib.sha256(Path(args.checkpoint).read_bytes()).hexdigest(),
         shape=[h, w],

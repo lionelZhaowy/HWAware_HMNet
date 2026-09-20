@@ -1,3 +1,5 @@
+本分支RGB-DVS乘加实验已提供 **[BF16单卡与FP32多卡训练命令](experiments/segmentation/TRAINING_PRECISION.md)**；下文保留工程总览，旧FP16命令不适用于新增乘加实验。
+
 # Hierarchical Neural Memory Network
 
 This repo is a PyTorch implementation of HMNet proposed in our paper: [Hierarchical Neural Network for Low Latency Event Processing](https://hamarh.github.io/hmnet/).
