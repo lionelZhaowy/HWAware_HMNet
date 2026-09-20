@@ -9,7 +9,7 @@ class TrainSettings:
     task = "segmentation"
     modality = "dvs"
     # Normal training uses epochs; explicit updates take priority.
-    epochs = 300
+    epochs = 150
     updates = None
     batch_size = 32
     accumulation = 1
@@ -22,7 +22,7 @@ class TrainSettings:
     eval_every_epochs = 1
     eval_batch_size = 32
     weight_decay = 0.01
-    workers = 16
+    workers = 8
     # One prefetched batch per worker limits memory across three experiments.
     prefetch_factor = 1
     output = str(ROOT / "logs/segmentation/efficientvit_b1")
