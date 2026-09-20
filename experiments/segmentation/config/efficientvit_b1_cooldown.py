@@ -14,7 +14,7 @@ class TrainSettings(_baseline.TrainSettings):
     warmup_epochs = 0
     min_learning_rate = 2e-6
     start_new_stage = True
-    output = str(Path(_baseline.TrainSettings.output) / "cooldown_20ep")
+    output = str(Path(_baseline.TrainSettings.output).parent / "cooldown_20ep")
 
 
 class TestSettings(_baseline.TestSettings):
