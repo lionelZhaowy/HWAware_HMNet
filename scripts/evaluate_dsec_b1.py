@@ -312,6 +312,7 @@ def main(args):
         classes=NAMES,
         precision="FP32",
         modality=cfg.modality,
+        fusion_mode=getattr(cfg, "fusion_mode", "add"),
         parameters=sum(p.numel() for p in model.parameters()),
         evaluated=metrics(sum(cs.values())),
         sequences={s: dict(frames=counts[s], **metrics(cs[s])) for s in seqs},

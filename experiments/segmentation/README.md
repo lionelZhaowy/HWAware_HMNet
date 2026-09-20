@@ -1,4 +1,6 @@
-# EfficientViT-B1 分割：150 epoch 模态对照实验
+# EfficientViT-B1 分割：基线与方案 C 融合实验
+
+当前工程新增 **方案 C：标准归一化 LiteMLA 双向交互**，使用独立配置 [efficientvit_b1_cross.py](config/efficientvit_b1_cross.py)。原相加基线仍使用 [efficientvit_b1.py](config/efficientvit_b1.py)，不会因本次更新切换结构。训练方案 C 请使用下方「方案 C」命令。
 
 本工程默认 **RGB+DVS**，分支 `main`。统一模型代码支持 `rgb`、`dvs`、`rgbdvs`；单模态只创建自己的编码器和投影层，不以置零输入冒充单模态训练。配置见 [efficientvit_b1.py](config/efficientvit_b1.py)。
 
@@ -15,7 +17,7 @@
 
 当前 B1 基线使用 **50 ms / 10 bins / 20 通道 RVT Histogram → 官方 EfficientViT-B1 → 四尺度 Pyramid → 各任务头**。它是无循环状态模型；尚未加入 HWAware B1、S-FIFO、自回归或 RENet/FRN 等复杂融合。目录名称含 HWAware 不代表当前骨干已经替换为硬件版本。
 
-三任务复用同一骨干实现，分别实例化、训练和保存权重，**不是共享参数的多任务联合训练**。当前分割支持 RGB-only、DVS-only、RGB+DVS；融合为双独立分支四尺度投影相加。检测及 Eventscape/MVSEC 深度当前使用 DVS-only，尚未接入 RGB 融合实验。
+三任务复用同一骨干实现，分别实例化、训练和保存权重，**不是共享参数的多任务联合训练**。当前分割支持 RGB-only、DVS-only、RGB+DVS；原基线融合为双独立分支四尺度投影相加；方案 C 在每个阶段进行双向交互，并将更新后的两路特征分别送入下一阶段。检测及 Eventscape/MVSEC 深度当前使用 DVS-only，尚未接入 RGB 融合实验。
 
 | 任务 | 数据表示如何得到 | 当前验证范围 |
 |---|---|---|
@@ -133,6 +135,84 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/t
 ```
 
 结果为实验目录的 `evaluation_dev.json` / `evaluation_test.json`。不指定 `--pretrained` 时仍读取最新 `checkpoint.pth`；测试 `TestSettings.batch_size=32`。三种模态均使用同一指标实现。
+
+## 方案 C：骨干阶段内双向 LiteMLA 交互
+
+配置：[efficientvit_b1_cross.py](config/efficientvit_b1_cross.py)。只在当前工程开展 RGB+DVS 方案 C；不实现方案 B、D，不修改两个单模态工程和备份工程。它从官方 ImageNet B1 初始化，需要新建训练，不恢复旧相加融合的任务检查点。
+
+### 结构
+
+各阶段使用原生通道 `32/64/128/256`，空间尺寸为 `110×160、55×80、28×40、14×20`。每路先经过一个 stride=1、expansion=2 的倒残差块（1×1扩展、3×3深度卷积、1×1投影，BN+ReLU，末端无激活），再投影产生 Q/K/V。RGB/DVS 参数独立。采用每头16通道，基础尺度和5×5深度卷积聚合尺度（后接按头分组1×1卷积），两尺度分别做注意力后拼接通道。
+
+设 `phi=ReLU`，`N=H×W`，下面按 `[B,heads,N,d]` 记法描述每个尺度：
+
+```text
+S_D = phi(K_D)^T V_D
+z_D = sum_N phi(K_D)
+A_R = phi(Q_R) S_D / (phi(Q_R) z_D + 1e-15)
+A_D 对称地使用 Q_D 与 K_R/V_R
+R′ = R + alpha_R * ConvBN(Concat(R, A_R))
+D′ = D + alpha_D * ConvBN(Concat(D, A_D))
+O  = ReLU(ConvBN(Concat(R′, D′)))
+```
+
+`alpha_R/alpha_D` 是各阶段独立的可学习标量，初始化0.1。实现内部采用 `[B,heads,d,N]` 布局，以给 V 添加常数1通道的方式一次计算分子/分母；Q/K使用ReLU，V保留符号。两次矩阵乘法及除法在FP32执行，结果转回输入dtype，再进行后续投影；保留标准LiteMLA除法归一化，没有采用HWAware近似。
+
+**R′/D′ 分别进入两路下一阶段；O 不回灌任何分支。** 每个 O 单独通过1×1Conv+BN+ReLU投影到256通道供原Pyramid使用，辅助头读取融合后的 `/4` 特征。两路更新采用相同阶段的原输入同时计算，不先更新一侧再给另一侧使用。该模块是借鉴LiteMLA和CMX交互思想的新实验结构，不声称复现CMX。
+
+### 数据准备、Train、Test
+
+**数据准备**：直接复用第1节的共享 DSEC 缓存和官方 B1 权重，无需重新生成 Histogram 或配准。
+
+**Train**（用户手动选择空闲GPU启动）：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/train.py \
+  experiments/segmentation/config/efficientvit_b1_cross.py --single --amp --seed 42
+```
+
+训练超参数全部继承基线：150 epoch、batch=32、accumulation=1、workers=8、AdamW、5轮预热、lr从2e-4余弦降到2e-6；标签、增强、损失和开发序列不变。输出为 `logs/segmentation/efficientvit_b1_cross/`，与原训练、cooldown平级。TensorBoard使用本README已有命令。
+
+恢复本实验（必须是方案 C 检查点）：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/train.py \
+  experiments/segmentation/config/efficientvit_b1_cross.py --single --amp --seed 42 \
+  --resume logs/segmentation/efficientvit_b1_cross/checkpoint.pth
+```
+
+**Test**（开发集；官方test的split/cache参数用法与第3节相同）：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/test.py \
+  experiments/segmentation/config/efficientvit_b1_cross.py \
+  --pretrained logs/segmentation/efficientvit_b1_cross/best_checkpoint.pth
+```
+
+`fusion_mode` 记录到训练契约和settings中；恢复时禁止把相加结构检查点当成方案 C。测试同样严格加载模型权重。旧相加检查点没有该字段时按 `add` 处理。
+
+### 验证与显存
+
+交互模块训练时默认使用非重入激活重计算，以维持 batch=32、accumulation=1。反向重计算时使用临时 BN 缓冲，避免运行均值、方差和计数被更新两次；测试已对照无重计算实现的输出、梯度和 BN 缓冲。eval/ONNX 不执行重计算。
+
+在 RTX 4090 24GB 上，440×640、真实32样本的两步AMP更新通过，峰值已分配约18.52 GiB、预留约19.47 GiB；FP32 eval batch=32约2.70 GiB（该测量仍保留优化器状态）。这是小样本工程验证，不是完整训练吞吐或精度结论。未启用重计算的本结构 batch=32 曾发生OOM，因此不要直接删除该保护。
+
+已验证：归一化线性注意力与显式注意力矩阵的输出/梯度一致、四尺度形状、实际阶段连接、双模态梯度、预训练首层适配、无状态推理、FP32/AMP两步真实样本更新、保存及恢复模型/AdamW/scaler、旧相加模型与三任务有效样本回归。恢复结果按 `atol=1e-6, rtol=1e-5` 核对，CUDA归约不保证逐位一致。未启动正式150轮训练，也未声称精度优于基线。
+
+冒烟日志、权重和可复运行的验证脚本在 `logs/segmentation/efficientvit_b1_cross_smoke/`，均受Git忽略规则保护。其中 `onnx/` 的完整ONNX与简化图使用两步冒烟权重，仅用于查看结构和检查导出；真实样本预测与PyTorch一致，零输入预测一致率约99.995%，不是训练完成的模型。
+
+### ONNX 与硬件边界
+
+训练完成后导出完整模型及onnxsim版本：
+
+```bash
+./scripts/hmnet-python scripts/export_b1_onnx.py --task segmentation \
+  --fusion-mode cross_stage \
+  --checkpoint logs/segmentation/efficientvit_b1_cross/best_checkpoint.pth \
+  --output logs/segmentation/efficientvit_b1_cross/onnx
+```
+
+增加 `--backbone-only` 只导出四尺度骨干输出。导出脚本执行PyTorch/ONNX Runtime/onnxsim数值对照。图外仍是Histogram和几何配准，图内无历史状态。FP32归一化和多尺度交互的Dremi算子映射、量化精度尚需后续验证；本实验没有移除除法，也没有替换原官方B1的激活/注意力。
 
 ## 4. 提前停止后的低学习率追加实验
 

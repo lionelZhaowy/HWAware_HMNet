@@ -222,6 +222,7 @@ def run(config, args):
     contract = dict(
         schedule=schedule,
         modality=getattr(config, "modality", "dvs"),
+        fusion_mode=getattr(config, "fusion_mode", "add"),
         batch_size=config.batch_size,
         accumulation=config.accumulation,
         train_samples=len(dataset),
@@ -240,6 +241,7 @@ def run(config, args):
                 resolved_updates=max_updates,
                 schedule=schedule,
                 modality=getattr(config, "modality", "dvs"),
+                fusion_mode=getattr(config, "fusion_mode", "add"),
                 batch_size=config.batch_size,
                 accumulation=config.accumulation,
             )
@@ -258,13 +260,17 @@ def run(config, args):
         raise ValueError("A new training stage requires --resume with a full checkpoint")
     if config.resume:
         ckpt = torch.load(config.resume, map_location="cpu", weights_only=False)
+        # Historical checkpoints predate the architecture field and use addition.
+        previous = dict(ckpt.get("training_contract", {}))
+        previous.setdefault("fusion_mode", "add")
+        if previous["fusion_mode"] != contract["fusion_mode"]:
+            raise ValueError("Resume fusion architecture differs; start a new experiment")
         # A new stage explicitly changes the LR budget but retains the optimizer,
         # sampling cursor and RNG. Ordinary resume still checks the full contract.
         new_stage = getattr(config, "start_new_stage", False) and not ckpt.get("stage_parent")
         if new_stage:
             if output.resolve() == Path(config.resume).resolve().parent or has_run:
                 raise ValueError("A new stage requires a separate, empty output directory")
-            previous = ckpt.get("training_contract", {})
             if {k: v for k, v in previous.items() if k != "schedule"} != {
                 k: v for k, v in contract.items() if k != "schedule"
             }:
@@ -278,7 +284,7 @@ def run(config, args):
                 best_miou=ckpt.get("best_miou"),
                 best_step=ckpt.get("best_step"),
             )
-        elif schedule["kind"] != "constant" and ckpt.get("training_contract") != contract:
+        elif schedule["kind"] != "constant" and previous != contract:
             raise ValueError(
                 "Resume training contract differs (modality/data/batch/seed/LR budget). "
                 "Use the original settings; old constant-LR runs are separate experiments."
@@ -341,6 +347,7 @@ def run(config, args):
                 lr=config.learning_rate,
                 lr_schedule=schedule,
                 modality=getattr(config, "modality", "dvs"),
+                fusion_mode=getattr(config, "fusion_mode", "add"),
                 eval_interval_updates=eval_interval,
                 weight_decay=config.weight_decay,
                 amp=args.amp,

@@ -4,6 +4,7 @@ from pathlib import Path
 import torch
 from torch import nn
 from .vendor.efficientvit.models.efficientvit.backbone import efficientvit_backbone_b1
+from .cross_modal_litemla import CrossModalLiteMLA
 
 
 class EfficientViTB1(nn.Module):
@@ -11,12 +12,20 @@ class EfficientViTB1(nn.Module):
     out_channels = (256, 256, 256, 256)
     out_strides = (4, 8, 16, 32)
 
-    def __init__(self, fusion=False, event_channels=20, pretrained=None, modality=None):
+    def __init__(
+        self, fusion=False, event_channels=20, pretrained=None, modality=None,
+        fusion_mode="add",
+    ):
         super().__init__()
         self.modality = modality or ("rgbdvs" if fusion else "dvs")
         if self.modality not in ("rgb", "dvs", "rgbdvs"):
             raise ValueError(f"Unknown input modality: {self.modality}")
         self.fusion = self.modality == "rgbdvs"
+        if fusion_mode not in ("add", "cross_stage"):
+            raise ValueError(f"Unknown fusion mode: {fusion_mode}")
+        if fusion_mode == "cross_stage" and not self.fusion:
+            raise ValueError("cross_stage requires RGB+DVS inputs")
+        self.fusion_mode = fusion_mode
         self.use_events = self.modality in ("dvs", "rgbdvs")
         self.use_rgb = self.modality in ("rgb", "rgbdvs")
         self.event_channels = event_channels
@@ -34,10 +43,16 @@ class EfficientViTB1(nn.Module):
                 ]
             )
 
-        if self.use_events:
-            self.event_proj = projections()
-        if self.use_rgb:
-            self.rgb_proj = projections()
+        if self.fusion_mode == "cross_stage":
+            self.interactions = nn.ModuleList(
+                [CrossModalLiteMLA(c) for c in (32, 64, 128, 256)]
+            )
+            self.fused_proj = projections()
+        else:
+            if self.use_events:
+                self.event_proj = projections()
+            if self.use_rgb:
+                self.rgb_proj = projections()
         self.relu = nn.ReLU()
 
     def init_weights(self):
@@ -87,6 +102,8 @@ class EfficientViTB1(nn.Module):
                 or rgb.shape[2:] != event_hist.shape[2:]
             ):
                 raise ValueError("RGB and DVS must share batch and spatial dimensions")
+        if self.fusion_mode == "cross_stage":
+            return self._forward_cross_stage(event_hist, rgb)
         ev = self.event_encoder(event_hist) if self.use_events else None
         im = self.rgb_encoder(rgb) if self.use_rgb else None
         outputs = []
@@ -96,4 +113,19 @@ class EfficientViTB1(nn.Module):
                 rgb_feature = self.rgb_proj[i](im[f"stage{i+1}"])
                 feature = rgb_feature if feature is None else feature + rgb_feature
             outputs.append(self.relu(feature))
+        return tuple(outputs)
+
+    def _forward_cross_stage(self, event_hist, rgb):
+        event = self.event_encoder.input_stem(event_hist)
+        rgb = self.rgb_encoder.input_stem(rgb)
+        outputs = []
+        for event_stage, rgb_stage, interaction, projection in zip(
+            self.event_encoder.stages, self.rgb_encoder.stages,
+            self.interactions, self.fused_proj,
+        ):
+            event, rgb = event_stage(event), rgb_stage(rgb)
+            # Only the two updated native-width streams enter the next stage.
+            # The merged 256-channel feature is exclusively a pyramid output.
+            rgb, event, fused = interaction(rgb, event)
+            outputs.append(self.relu(projection(fused)))
         return tuple(outputs)

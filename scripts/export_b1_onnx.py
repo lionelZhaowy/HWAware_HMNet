@@ -45,7 +45,9 @@ def export(args):
         "depth_eventscape": (256, 512),
         "depth_mvsec": (260, 346),
     }[args.task]
-    model = build_frame_task(task, mvsec=args.task == "depth_mvsec").eval()
+    model = build_frame_task(
+        task, mvsec=args.task == "depth_mvsec", fusion_mode=args.fusion_mode
+    ).eval()
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     model.load_state_dict(ckpt.get("state_dict", ckpt), strict=True)
     wrapper = FrameGraph(model, task, h, w, args.backbone_only).eval()
@@ -125,6 +127,7 @@ def export(args):
             np.testing.assert_allclose(values[0][j], values[1][j], atol=1e-5, rtol=1e-4)
     report = dict(
         task=args.task,
+        fusion_mode=args.fusion_mode,
         checkpoint=args.checkpoint,
         checkpoint_sha256=hashlib.sha256(Path(args.checkpoint).read_bytes()).hexdigest(),
         shape=[h, w],
@@ -147,6 +150,8 @@ if __name__ == "__main__":
         choices=["segmentation", "detection", "depth_eventscape", "depth_mvsec"],
         required=True,
     )
+    p.add_argument("--fusion-mode", choices=["add", "cross_stage"], default="add",
+                   help="Must match the checkpoint architecture")
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--output", default="logs/onnx/efficientvit_b1")
     p.add_argument("--sample")

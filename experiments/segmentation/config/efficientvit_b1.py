@@ -8,6 +8,7 @@ class TrainSettings:
     frame_training = True
     task = "segmentation"
     modality = "rgbdvs"
+    fusion_mode = "add"
     # Normal training uses epochs; explicit updates take priority.
     epochs = 150
     updates = None
@@ -37,6 +38,7 @@ class TrainSettings:
             self.task,
             self.pretrained,
             modality=self.modality,
+            fusion_mode=self.fusion_mode,
         )
 
     def get_dataset(self):
