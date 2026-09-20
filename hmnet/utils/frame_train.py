@@ -222,7 +222,7 @@ def run(config, args):
     contract = dict(
         schedule=schedule,
         modality=getattr(config, "modality", "dvs"),
-        fusion_mode=("cross_stage_post_mbconv" if getattr(config, "modality", "dvs") == "rgbdvs" else "none"),
+        fusion_mode=("cross_stage_post_mbconv_muladd" if getattr(config, "modality", "dvs") == "rgbdvs" else "none"),
         batch_size=config.batch_size,
         accumulation=config.accumulation,
         train_samples=len(dataset),
@@ -241,7 +241,7 @@ def run(config, args):
                 resolved_updates=max_updates,
                 schedule=schedule,
                 modality=getattr(config, "modality", "dvs"),
-                fusion_mode=("cross_stage_post_mbconv" if getattr(config, "modality", "dvs") == "rgbdvs" else "none"),
+                fusion_mode=("cross_stage_post_mbconv_muladd" if getattr(config, "modality", "dvs") == "rgbdvs" else "none"),
                 batch_size=config.batch_size,
                 accumulation=config.accumulation,
             )
@@ -348,7 +348,7 @@ def run(config, args):
                 lr=config.learning_rate,
                 lr_schedule=schedule,
                 modality=getattr(config, "modality", "dvs"),
-                fusion_mode=("cross_stage_post_mbconv" if getattr(config, "modality", "dvs") == "rgbdvs" else "none"),
+                fusion_mode=("cross_stage_post_mbconv_muladd" if getattr(config, "modality", "dvs") == "rgbdvs" else "none"),
                 eval_interval_updates=eval_interval,
                 weight_decay=config.weight_decay,
                 amp=args.amp,

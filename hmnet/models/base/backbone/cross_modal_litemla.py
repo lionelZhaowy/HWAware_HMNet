@@ -126,8 +126,12 @@ class CrossModalLiteMLA(nn.Module):
         return self._forward(rgb, event)
 
     def _forward(self, rgb, event):
-        # Residual paths keep each stream's spatial information and identity;
-        # only the cross-attention context is borrowed from the other stream.
+        # Shared elementwise interaction on aligned [B,C,H,W] stage features.
+        # Compute from BOTH original streams before either residual is updated.
+        interaction = rgb * event
+        rgb, event = rgb + interaction, event + interaction
+        # The original fusion (including its residual paths) consumes the
+        # enhanced streams; no new parameters, projections or normalization.
         qr, kr, vr = self._qkv(rgb, self.rgb_qkv, self.rgb_aggreg)
         qe, ke, ve = self._qkv(event, self.event_qkv, self.event_aggreg)
         ar = self.normalized_attention(qr, ke, ve, self.eps).reshape(

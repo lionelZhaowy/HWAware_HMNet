@@ -151,7 +151,7 @@ def export(args):
         failures=failures,
         sample=args.sample,
         task=args.task,
-        fusion_mode="cross_stage_post_mbconv" if task == "segmentation" else "none",
+        fusion_mode="cross_stage_post_mbconv_muladd" if task == "segmentation" else "none",
         checkpoint=args.checkpoint,
         checkpoint_sha256=hashlib.sha256(Path(args.checkpoint).read_bytes()).hexdigest(),
         shape=[h, w],
