@@ -8,7 +8,6 @@ class TrainSettings:
     frame_training = True
     task = "segmentation"
     modality = "rgbdvs"
-    fusion_mode = "add"
     # Normal training uses epochs; explicit updates take priority.
     epochs = 150
     updates = None
@@ -26,7 +25,7 @@ class TrainSettings:
     workers = 8
     # One prefetched batch per worker limits memory across three experiments.
     prefetch_factor = 1
-    output = str(ROOT / "logs/segmentation/efficientvit_b1")
+    output = str(ROOT / "logs/segmentation/efficientvit_b1_cross")
     cache = (
         "/home/zhaowenyao24/Conda_prj/lab_dataset/DSEC_Semantic/preprocessed/dsec_b1"
     )
@@ -38,7 +37,6 @@ class TrainSettings:
             self.task,
             self.pretrained,
             modality=self.modality,
-            fusion_mode=self.fusion_mode,
         )
 
     def get_dataset(self):

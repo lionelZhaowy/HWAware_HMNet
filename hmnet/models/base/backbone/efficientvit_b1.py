@@ -14,18 +14,12 @@ class EfficientViTB1(nn.Module):
 
     def __init__(
         self, fusion=False, event_channels=20, pretrained=None, modality=None,
-        fusion_mode="add",
     ):
         super().__init__()
         self.modality = modality or ("rgbdvs" if fusion else "dvs")
         if self.modality not in ("rgb", "dvs", "rgbdvs"):
             raise ValueError(f"Unknown input modality: {self.modality}")
         self.fusion = self.modality == "rgbdvs"
-        if fusion_mode not in ("add", "cross_stage"):
-            raise ValueError(f"Unknown fusion mode: {fusion_mode}")
-        if fusion_mode == "cross_stage" and not self.fusion:
-            raise ValueError("cross_stage requires RGB+DVS inputs")
-        self.fusion_mode = fusion_mode
         self.use_events = self.modality in ("dvs", "rgbdvs")
         self.use_rgb = self.modality in ("rgb", "rgbdvs")
         self.event_channels = event_channels
@@ -43,7 +37,7 @@ class EfficientViTB1(nn.Module):
                 ]
             )
 
-        if self.fusion_mode == "cross_stage":
+        if self.fusion:
             self.interactions = nn.ModuleList(
                 [CrossModalLiteMLA(c) for c in (32, 64, 128, 256)]
             )
@@ -102,18 +96,12 @@ class EfficientViTB1(nn.Module):
                 or rgb.shape[2:] != event_hist.shape[2:]
             ):
                 raise ValueError("RGB and DVS must share batch and spatial dimensions")
-        if self.fusion_mode == "cross_stage":
+        if self.fusion:
             return self._forward_cross_stage(event_hist, rgb)
-        ev = self.event_encoder(event_hist) if self.use_events else None
-        im = self.rgb_encoder(rgb) if self.use_rgb else None
-        outputs = []
-        for i in range(4):
-            feature = self.event_proj[i](ev[f"stage{i+1}"]) if ev is not None else None
-            if im is not None:
-                rgb_feature = self.rgb_proj[i](im[f"stage{i+1}"])
-                feature = rgb_feature if feature is None else feature + rgb_feature
-            outputs.append(self.relu(feature))
-        return tuple(outputs)
+        encoder = self.event_encoder if self.use_events else self.rgb_encoder
+        projection = self.event_proj if self.use_events else self.rgb_proj
+        features = encoder(event_hist if self.use_events else rgb)
+        return tuple(self.relu(projection[i](features[f"stage{i+1}"])) for i in range(4))
 
     def _forward_cross_stage(self, event_hist, rgb):
         event = self.event_encoder.input_stem(event_hist)

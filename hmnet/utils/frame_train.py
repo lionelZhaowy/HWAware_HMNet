@@ -222,7 +222,7 @@ def run(config, args):
     contract = dict(
         schedule=schedule,
         modality=getattr(config, "modality", "dvs"),
-        fusion_mode=getattr(config, "fusion_mode", "add"),
+        fusion_mode=("cross_stage" if getattr(config, "modality", "dvs") == "rgbdvs" else "none"),
         batch_size=config.batch_size,
         accumulation=config.accumulation,
         train_samples=len(dataset),
@@ -241,7 +241,7 @@ def run(config, args):
                 resolved_updates=max_updates,
                 schedule=schedule,
                 modality=getattr(config, "modality", "dvs"),
-                fusion_mode=getattr(config, "fusion_mode", "add"),
+                fusion_mode=("cross_stage" if getattr(config, "modality", "dvs") == "rgbdvs" else "none"),
                 batch_size=config.batch_size,
                 accumulation=config.accumulation,
             )
@@ -260,10 +260,11 @@ def run(config, args):
         raise ValueError("A new training stage requires --resume with a full checkpoint")
     if config.resume:
         ckpt = torch.load(config.resume, map_location="cpu", weights_only=False)
-        # Historical checkpoints predate the architecture field and use addition.
+        # RGB+DVS checkpoints must explicitly identify the current architecture.
         previous = dict(ckpt.get("training_contract", {}))
-        previous.setdefault("fusion_mode", "add")
-        if previous["fusion_mode"] != contract["fusion_mode"]:
+        if previous.get("modality") != "rgbdvs":
+            previous["fusion_mode"] = "none"
+        if previous.get("fusion_mode") != contract["fusion_mode"]:
             raise ValueError("Resume fusion architecture differs; start a new experiment")
         # A new stage explicitly changes the LR budget but retains the optimizer,
         # sampling cursor and RNG. Ordinary resume still checks the full contract.
@@ -347,7 +348,7 @@ def run(config, args):
                 lr=config.learning_rate,
                 lr_schedule=schedule,
                 modality=getattr(config, "modality", "dvs"),
-                fusion_mode=getattr(config, "fusion_mode", "add"),
+                fusion_mode=("cross_stage" if getattr(config, "modality", "dvs") == "rgbdvs" else "none"),
                 eval_interval_updates=eval_interval,
                 weight_decay=config.weight_decay,
                 amp=args.amp,

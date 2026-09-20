@@ -4,9 +4,9 @@
 
 ## 方案 C 更新（2026-09-20）
 
-当前工程新增独立配置 `experiments/segmentation/config/efficientvit_b1_cross.py`：在官方B1四个阶段原生32/64/128/256通道上使用带除法归一化的双向LiteMLA交互，两路交互输出分别输入下一阶段，融合输出投影为256通道送入Pyramid。训练设置继承150轮相加基线，输出独立保存到 `logs/segmentation/efficientvit_b1_cross/`。
+当前工程主配置为 `experiments/segmentation/config/efficientvit_b1.py`：在官方B1四个阶段原生32/64/128/256通道上使用带除法归一化的双向LiteMLA交互，两路交互输出分别输入下一阶段，融合输出投影为256通道送入Pyramid。训练设置继承150轮相加基线，输出独立保存到 `logs/segmentation/efficientvit_b1_cross/`。
 
-具体结构、数据准备、训练、恢复、评估和ONNX命令见[分割README方案C](../experiments/segmentation/README.md#方案-c骨干阶段内双向-litemla-交互)。本次不实现B/D方案、HWAware、S-FIFO或时序模块；原相加配置、检测/深度配置及备份工程保留。下面各节描述原首版基线。
+具体结构、数据准备、训练、恢复、评估和ONNX命令见[分割README方案C](../experiments/segmentation/README.md#方案-c骨干阶段内双向-litemla-交互)。本次不实现B/D方案、HWAware、S-FIFO或时序模块；当前工程已移除旧相加实现和cooldown配置，检测/深度单模态及其他备份工程保留。下面各节仅记录历史首版基线，当前结构以本节及分割README为准。
 
 ## 1. 已实现的网络
 
