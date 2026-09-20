@@ -97,7 +97,13 @@ CUDA_VISIBLE_DEVICES=1 ./scripts/hmnet-python experiments/segmentation/scripts/t
 
 已验证注意力输出/梯度、后置MBConv位置和两段残差、双分支下一阶段连接、重计算对照（含BN）、预训练加载、FP32/AMP真实样本更新和保存恢复。诊断产物在 `logs/segmentation/efficientvit_b1_cross_v21_smoke/`，不进入Git。
 
-额外导出的[完整模型（onnxsim）](../../logs/segmentation/efficientvit_b1_cross_v21_smoke/onnx/segmentation.sim.onnx)使用两步冒烟权重，仅供结构检查，**尚未通过完整数值验收**。固定batch=1、440×640：真实样本最大logit误差约3×10⁻⁴、预测一致；全零输入误差约5×10⁻³，超过脚本的逐元素容差（atol=1e-3、rtol=1e-4）。禁用Conv/BN折叠后仍有约3.7×10⁻³误差，原因尚未完全定位；PyTorch不同CPU卷积后端也存在约1.6×10⁻³差异。保留原验证阈值，没有将该导出标为成功；骨干单独导出尚未执行。诊断日志保存在上述smoke目录，不能将此图直接作为部署验收结果。
+第5轮末（step=1140）ONNX排查结果：5帧真实样本最大logit误差低于9×10⁻⁵、预测完全一致；真实RGB＋空事件也通过原容差。全零输入最大误差约2.16×10⁻³，仍有约0.10%的logit元素超容差。原始ONNX与onnxsim在7组输入上输出完全一致。主要误差放大位于DVS stage4最后一个**原版LiteMLA**：稀疏Q中的小分量对前序FP32扰动敏感，FP64交叉对照已复现；该位置分母约0.38，不是接近epsilon。没有修改训练模型或放宽阈值。
+
+- [详细排查与复现记录](../../logs/segmentation/onnx_diagnosis_epoch5/ONNX数值差异排查.md)
+- [完整模型（onnxsim，仅供结构检查）](../../logs/segmentation/onnx_diagnosis_epoch5/onnx/segmentation.sim.onnx)
+- [数值报告（passed=false）](../../logs/segmentation/onnx_diagnosis_epoch5/onnx/segmentation.report.json)
+
+导出脚本现在会完成全部测试并保存报告，再对超容差结果报错；不会将边界输入失败标为成功。此图尚未通过完整部署验收。所有检查使用固定权重副本，未中断训练。
 
 ### ONNX 与硬件边界
 
