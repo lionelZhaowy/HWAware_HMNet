@@ -4,7 +4,9 @@ The ReLU kernel, multi-scale aggregation and padded-V normalization follow the
 vendored official EfficientViT LiteMLA (vendor/efficientvit/models/nn/ops.py;
 upstream license: vendor/efficientvit/LICENSE). Queries attend to the OTHER stream's
 keys/values. Two residual streams continue through the backbone; a separate
-merged feature goes to the pyramid. This is experiment C, not CMX replication.
+merged feature goes to the pyramid. v2.1 follows EfficientViTBlock ordering:
+attention projection + residual, then local MBConv + residual. The learned
+attention residual scales are retained from the previous cross-modal experiment.
 """
 
 from contextlib import contextmanager, nullcontext
@@ -28,13 +30,16 @@ class CrossModalLiteMLA(nn.Module):
         self.eps = eps
 
         def local():
-            # One inverted residual block per modality, shared by its Q/K/V
-            # projections. Expansion=2 bounds high-resolution fusion overhead.
-            return MBConv(channels, channels, expand_ratio=2,
-                          act_func=("relu", "relu", None))
+            # Match the official EfficientViTBlock's POST-attention local block:
+            # expansion=4, HardSwish, bias in expansion/depthwise, final BN only.
+            return MBConv(
+                channels, channels, expand_ratio=4,
+                use_bias=(True, True, False), norm=(None, None, "bn2d"),
+                act_func=("hswish", "hswish", None),
+            )
 
-        self.rgb_local = local()
-        self.event_local = local()
+        self.rgb_post = local()
+        self.event_post = local()
         self.rgb_qkv = nn.Conv2d(channels, 3 * channels, 1, bias=False)
         self.event_qkv = nn.Conv2d(channels, 3 * channels, 1, bias=False)
 
@@ -57,8 +62,8 @@ class CrossModalLiteMLA(nn.Module):
             return nn.Sequential(nn.Conv2d(in_channels, channels, 1, bias=False),
                                  nn.BatchNorm2d(channels))
 
-        self.rgb_update = projection(channels + attention_channels)
-        self.event_update = projection(channels + attention_channels)
+        self.rgb_update = projection(attention_channels)
+        self.event_update = projection(attention_channels)
         self.rgb_scale = nn.Parameter(torch.tensor(float(residual_scale)))
         self.event_scale = nn.Parameter(torch.tensor(float(residual_scale)))
         self.merge = nn.Sequential(projection(2 * channels), nn.ReLU())
@@ -123,13 +128,20 @@ class CrossModalLiteMLA(nn.Module):
     def _forward(self, rgb, event):
         # Residual paths keep each stream's spatial information and identity;
         # only the cross-attention context is borrowed from the other stream.
-        qr, kr, vr = self._qkv(rgb + self.rgb_local(rgb), self.rgb_qkv, self.rgb_aggreg)
-        qe, ke, ve = self._qkv(event + self.event_local(event), self.event_qkv, self.event_aggreg)
+        qr, kr, vr = self._qkv(rgb, self.rgb_qkv, self.rgb_aggreg)
+        qe, ke, ve = self._qkv(event, self.event_qkv, self.event_aggreg)
         ar = self.normalized_attention(qr, ke, ve, self.eps).reshape(
             rgb.shape[0], -1, rgb.shape[2], rgb.shape[3])
         ae = self.normalized_attention(qe, kr, vr, self.eps).reshape(
             event.shape[0], -1, event.shape[2], event.shape[3])
-        rgb_next = rgb + self.rgb_scale * self.rgb_update(torch.cat((rgb, ar), dim=1))
-        event_next = event + self.event_scale * self.event_update(torch.cat((event, ae), dim=1))
+        # Project attention alone (2*C -> C for the two default scales), then
+        # retain the receiving stream's identity. Both directions use the same
+        # pre-update inputs, so neither branch sees an already-updated partner.
+        rgb_context = rgb + self.rgb_scale * self.rgb_update(ar)
+        event_context = event + self.event_scale * self.event_update(ae)
+        # Local processing now sees the exchanged information. Feed these two
+        # distinct outputs to the next stage AND to the current pyramid output.
+        rgb_next = rgb_context + self.rgb_post(rgb_context)
+        event_next = event_context + self.event_post(event_context)
         output = self.merge(torch.cat((rgb_next, event_next), dim=1))
         return rgb_next, event_next, output

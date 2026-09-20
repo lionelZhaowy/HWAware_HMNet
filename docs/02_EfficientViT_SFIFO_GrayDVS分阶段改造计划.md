@@ -2,11 +2,17 @@
 
 > 更新：2026-09-17。本页取代原先的三层记忆适配候选方案，记录本轮**已实现、已运行**的帧式路线。原 HMNet 网络结构和 B3 ONNX 说明继续保留在 [05 文档](05_HMNet三任务B3详细网络结构与ONNX导出.md)。
 
+## v2.1：完整交互块（方案B）
+
+本分支 `seg_rgbdvs_640x440_v2.1` 在独立工程实现：移除前置IRB，注意力输出独立Conv+BN投影并残差相加，随后官方风格expansion=4、HardSwish的后置MBConv及残差；保留双分支流、原生通道、标准除法归一化和可学习alpha。训练设置不变，输出 `logs/segmentation/efficientvit_b1_cross_v21/`，结构标识 `cross_stage_post_mbconv`，从ImageNet重新训练。单卡batch32实测通过，未引入多卡框架。命令及验证见[分割README](../experiments/segmentation/README.md)。
+
+下面保留先前路线记录，当前实现以本节及分割README为准。
+
 ## 方案 C 更新（2026-09-20）
 
 当前工程主配置为 `experiments/segmentation/config/efficientvit_b1.py`：在官方B1四个阶段原生32/64/128/256通道上使用带除法归一化的双向LiteMLA交互，两路交互输出分别输入下一阶段，融合输出投影为256通道送入Pyramid。训练设置继承150轮相加基线，输出独立保存到 `logs/segmentation/efficientvit_b1_cross/`。
 
-具体结构、数据准备、训练、恢复、评估和ONNX命令见[分割README方案C](../experiments/segmentation/README.md#方案-c骨干阶段内双向-litemla-交互)。本次不实现B/D方案、HWAware、S-FIFO或时序模块；当前工程已移除旧相加实现和cooldown配置，检测/深度单模态及其他备份工程保留。下面各节仅记录历史首版基线，当前结构以本节及分割README为准。
+具体结构、数据准备、训练、恢复、评估和ONNX命令见[分割README方案C](../experiments/segmentation/README.md)。本次不实现B/D方案、HWAware、S-FIFO或时序模块；当前工程已移除旧相加实现和cooldown配置，检测/深度单模态及其他备份工程保留。下面各节仅记录历史首版基线，当前结构以本节及分割README为准。
 
 ## 1. 已实现的网络
 

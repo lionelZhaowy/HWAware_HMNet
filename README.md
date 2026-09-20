@@ -10,7 +10,7 @@ This repo is a PyTorch implementation of HMNet proposed in our paper: [Hierarchi
 - [检测：GEN1，数据准备 / train / test](experiments/detection/README.md)：已接入 B1 并做真实样本冒烟，正式全量实验待开展。
 - [深度：Eventscape / MVSEC，数据准备 / train / test](experiments/depth/README.md)：已接入 B1 并做真实样本冒烟，正式全量实验待开展。
 
-三任务复用骨干结构、分别训练，不是共享参数的多任务学习。先在分割实验确定事件帧表示、骨干、融合及后续时序自回归方案，再逐项迁移至检测/深度。当前代码使用 RVT Histogram、官方 B1，分割RGB+DVS统一使用方案 C：标准归一化 LiteMLA 双分支阶段交互（主配置 `efficientvit_b1.py`），旧相加实现已移至备份工程。HWAware、S-FIFO、自回归尚未接入。
+三任务复用骨干结构、分别训练，不是共享参数的多任务学习。先在分割实验确定事件帧表示、骨干、融合及后续时序自回归方案，再逐项迁移至检测/深度。当前代码使用 RVT Histogram、官方 B1，本v2.1工程分割RGB+DVS使用完整交互块：标准归一化LiteMLA交叉注意力独立投影与残差，再接后置MBConv与残差（主配置 `efficientvit_b1.py`），旧相加实现已移至备份工程。HWAware、S-FIFO、自回归尚未接入。
 
 检测/深度的 Histogram 当前在 CPU worker 在线计算，但下载后仍须离线整理事件/标签并生成时间索引；任务 README 提供共享目录下的命令。预处理结果放数据集 `preprocessed/`，训练和评估结果放本工程 `logs/`，无需跨工程访问训练目录。三个分割模态实验保持相同训练配置，不能把其超参数直接视为检测/深度正式方案。
 

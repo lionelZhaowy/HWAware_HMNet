@@ -1,8 +1,8 @@
-# EfficientViT-B1 分割：方案 C
+# EfficientViT-B1 分割：v2.1 完整交互块（方案 B）
 
-当前RGB+DVS使用**标准归一化LiteMLA双分支阶段交互**。主配置为 [efficientvit_b1.py](config/efficientvit_b1.py)。旧相加融合实现和旧cooldown配置已移除；历史模型请在备份工程中使用。`efficientvit_b1_cross.py` 仅是主配置的别名，保留给已经启动的方案C任务，二者模型和参数完全相同。
+当前工程为 `HWAware_HMNet_Seg_RGBDVS_640x440_v2.1`，分支 `seg_rgbdvs_640x440_v2.1`。RGB+DVS采用标准归一化LiteMLA交叉注意力，并按完整EfficientViTBlock顺序重构：**注意力独立投影＋残差 → 后置MBConv＋残差**。主配置为 [efficientvit_b1.py](config/efficientvit_b1.py)，`efficientvit_b1_cross.py`仅为同配置别名。
 
-输出仍为 `logs/segmentation/efficientvit_b1_cross/`，已有方案C训练可正常恢复。三任务独立训练，不共享参数；检测和深度继续使用单模态结构，数据准备见各自README。当前没有HWAware、S-FIFO或时序模块。
+这是上一轮讨论中的“方案B：完整块顺序重构”，仍保留骨干内双分支交互，不是更早讨论的“仅在Neck融合”。旧结构保存在其他工程，本工程不兼容旧结构任务权重。新的输出为 `logs/segmentation/efficientvit_b1_cross_v21/`；复制工程时带来的旧logs不会被覆盖。三任务独立训练，检测和深度单模态保持原样；本次没有HWAware、S-FIFO或时序模块。
 
 下面命令均从工程根目录运行。
 
@@ -30,13 +30,13 @@
 
 增加 `--split test` 会生成独立的 `dsec_b1_test`。预训练文件为本工程 `pretrained/efficientvit_b1_r224.pth`，权重、缓存不进入Git。
 
-## 方案 C：骨干阶段内双向 LiteMLA 交互
+## v2.1：骨干阶段内双向交互与后置局部块
 
-配置：[efficientvit_b1.py](config/efficientvit_b1.py)。当前工程RGB+DVS仅实现方案C，旧相加融合已删除；单模态仍供检测、深度和对照使用。它从官方 ImageNet B1 初始化，需要新建训练，不恢复旧相加融合的任务检查点。
+配置：[efficientvit_b1.py](config/efficientvit_b1.py)。当前RGB+DVS只实现v2.1结构；从官方ImageNet B1初始化新实验，不resume上一版Cross或旧相加模型。
 
 ### 结构
 
-各阶段使用原生通道 `32/64/128/256`，空间尺寸为 `110×160、55×80、28×40、14×20`。每路先经过一个 stride=1、expansion=2 的倒残差块（1×1扩展、3×3深度卷积、1×1投影，BN+ReLU，末端无激活），再投影产生 Q/K/V。RGB/DVS 参数独立。采用每头16通道，基础尺度和5×5深度卷积聚合尺度（后接按头分组1×1卷积），两尺度分别做注意力后拼接通道。
+各阶段使用原生通道 `32/64/128/256`，空间尺寸为 `110×160、55×80、28×40、14×20`。移除前置IRB；每路直接通过1×1卷积产生Q/K/V。RGB/DVS 参数独立。采用每头16通道，基础尺度和5×5深度卷积聚合尺度（后接按头分组1×1卷积），两尺度分别做注意力后拼接通道。
 
 设 `phi=ReLU`，`N=H×W`，下面按 `[B,heads,N,d]` 记法描述每个尺度：
 
@@ -45,12 +45,16 @@ S_D = phi(K_D)^T V_D
 z_D = sum_N phi(K_D)
 A_R = phi(Q_R) S_D / (phi(Q_R) z_D + 1e-15)
 A_D 对称地使用 Q_D 与 K_R/V_R
-R′ = R + alpha_R * ConvBN(Concat(R, A_R))
-D′ = D + alpha_D * ConvBN(Concat(D, A_D))
+U_R = R + alpha_R * ConvBN(A_R)
+U_D = D + alpha_D * ConvBN(A_D)
+R′ = U_R + MBConv_R(U_R)
+D′ = U_D + MBConv_D(U_D)
 O  = ReLU(ConvBN(Concat(R′, D′)))
 ```
 
-`alpha_R/alpha_D` 是各阶段独立的可学习标量，初始化0.1。实现内部采用 `[B,heads,d,N]` 布局，以给 V 添加常数1通道的方式一次计算分子/分母；Q/K使用ReLU，V保留符号。两次矩阵乘法及除法在FP32执行，结果转回输入dtype，再进行后续投影；保留标准LiteMLA除法归一化，没有采用HWAware近似。
+注意力输出投影为2C→C，不再拼接原特征。后置MBConv按官方块设置：stride=1、expansion=4，1×1扩展和3×3深度卷积带bias与HardSwish、无BN；末端1×1投影无bias、带BN、无激活，外部残差。两模态参数独立。
+
+`alpha_R/alpha_D` 保留为各阶段独立的可学习标量，初始化0.1，这是相对官方未缩放残差的保留差异。实现内部采用 `[B,heads,d,N]` 布局，以给 V 添加常数1通道的方式一次计算分子/分母；Q/K使用ReLU，V保留符号。两次矩阵乘法及除法在FP32执行，结果转回输入dtype，再进行后续投影；保留标准LiteMLA除法归一化，没有采用HWAware近似。
 
 **R′/D′ 分别进入两路下一阶段；O 不回灌任何分支。** 每个 O 单独通过1×1Conv+BN+ReLU投影到256通道供原Pyramid使用，辅助头读取融合后的 `/4` 特征。两路更新采用相同阶段的原输入同时计算，不先更新一侧再给另一侧使用。该模块是借鉴LiteMLA和CMX交互思想的新实验结构，不声称复现CMX。
 
@@ -61,49 +65,39 @@ O  = ReLU(ConvBN(Concat(R′, D′)))
 **Train**（用户手动选择空闲GPU启动）：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/train.py \
+CUDA_VISIBLE_DEVICES=1 ./scripts/hmnet-python experiments/segmentation/scripts/train.py \
   experiments/segmentation/config/efficientvit_b1.py --single --amp --seed 42
 ```
 
-训练超参数为：150 epoch、batch=32、accumulation=1、workers=8、AdamW、5轮预热、lr从2e-4余弦降到2e-6；标签、增强、损失和开发序列不变。输出为 `logs/segmentation/efficientvit_b1_cross/`，与原训练、cooldown平级。TensorBoard使用本README已有命令。
+训练超参数为：150 epoch、batch=32、accumulation=1、workers=8、AdamW、5轮预热、lr从2e-4余弦降到2e-6；标签、增强、损失和开发序列不变。输出为 `logs/segmentation/efficientvit_b1_cross_v21/`，与原训练、cooldown平级。TensorBoard使用本README已有命令。
 
-恢复本实验（必须是方案 C 检查点）：
+恢复本实验（必须是v2.1检查点）：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/train.py \
+CUDA_VISIBLE_DEVICES=1 ./scripts/hmnet-python experiments/segmentation/scripts/train.py \
   experiments/segmentation/config/efficientvit_b1.py --single --amp --seed 42 \
-  --resume logs/segmentation/efficientvit_b1_cross/checkpoint.pth
+  --resume logs/segmentation/efficientvit_b1_cross_v21/checkpoint.pth
 ```
 
 **Test**（开发集；官方test命令见下方）：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/test.py \
+CUDA_VISIBLE_DEVICES=1 ./scripts/hmnet-python experiments/segmentation/scripts/test.py \
   experiments/segmentation/config/efficientvit_b1.py \
-  --pretrained logs/segmentation/efficientvit_b1_cross/best_checkpoint.pth
+  --pretrained logs/segmentation/efficientvit_b1_cross_v21/best_checkpoint.pth
 ```
 
-`fusion_mode` 记录到训练契约和settings中；恢复时禁止把相加结构检查点当成方案 C。测试同样严格加载模型权重。旧相加检查点不再支持，请在备份工程中使用。
+训练契约和settings使用结构标识 `cross_stage_post_mbconv`；恢复时拒绝旧 `cross_stage` 或相加检查点，测试也严格加载权重。不得用strict=False掩盖结构差异。
 
 ### 验证与显存
 
 交互模块训练时默认使用非重入激活重计算，以维持 batch=32、accumulation=1。反向重计算时使用临时 BN 缓冲，避免运行均值、方差和计数被更新两次；测试已对照无重计算实现的输出、梯度和 BN 缓冲。eval/ONNX 不执行重计算。
 
-在 RTX 4090 24GB 上，440×640、真实32样本的两步AMP更新通过，峰值已分配约18.52 GiB、预留约19.47 GiB；FP32 eval batch=32约2.70 GiB（该测量仍保留优化器状态）。这是小样本工程验证，不是完整训练吞吐或精度结论。未启用重计算的本结构 batch=32 曾发生OOM，因此不要直接删除该保护。
+在RTX 4090 24GB、440×640输入上，已完成真实32样本的两步AMP更新：峰值已分配18.53 GiB、预留19.47 GiB；保留优化器状态时，FP32 eval batch=32峰值约3.20 GiB。模型16,745,838参数。**单卡batch=32可运行，因此不新增多卡路径，保持batch=32、accumulation=1。** 这只是短程显存验证，不是完整训练吞吐或收敛结论。
 
-已验证：归一化线性注意力与显式注意力矩阵的输出/梯度一致、四尺度形状、实际阶段连接、双模态梯度、预训练首层适配、无状态推理、FP32/AMP两步真实样本更新、保存及恢复模型/AdamW/scaler、三任务有效样本处理。恢复结果按 `atol=1e-6, rtol=1e-5` 核对，CUDA归约不保证逐位一致。这些检查不代表正式训练收敛，也未声称精度优于基线。
+已验证注意力输出/梯度、后置MBConv位置和两段残差、双分支下一阶段连接、重计算对照（含BN）、预训练加载、FP32/AMP真实样本更新和保存恢复。诊断产物在 `logs/segmentation/efficientvit_b1_cross_v21_smoke/`，不进入Git。
 
-冒烟日志、权重和可复运行的验证脚本在 `logs/segmentation/efficientvit_b1_cross_smoke/`，均受Git忽略规则保护。其中 `onnx/` 的完整ONNX与简化图使用两步冒烟权重，仅用于查看结构和检查导出；真实样本预测与PyTorch一致，零输入预测一致率约99.995%，不是训练完成的模型。
-
-### 当前可检查的 ONNX
-
-已导出当前方案C第1次更新的冻结检查点：
-
-- [完整模型（onnxsim）](../../logs/segmentation/efficientvit_b1_cross/onnx/step_1/segmentation.sim.onnx)
-- [骨干与阶段交互（onnxsim）](../../logs/segmentation/efficientvit_b1_cross/onnx/step_1/segmentation_backbone.sim.onnx)
-- 同目录保留原始ONNX、源权重快照、来源说明和数值对照报告。文件仅保存在本地logs，不进入Git。
-
-输入固定batch=1、440×640；简化图去除了Cast，保留必要的归一化Div。该权重仅训练1次更新，适合查看网络结构，不代表最终精度。
+额外导出的[完整模型（onnxsim）](../../logs/segmentation/efficientvit_b1_cross_v21_smoke/onnx/segmentation.sim.onnx)使用两步冒烟权重，仅供结构检查，**尚未通过完整数值验收**。固定batch=1、440×640：真实样本最大logit误差约3×10⁻⁴、预测一致；全零输入误差约5×10⁻³，超过脚本的逐元素容差（atol=1e-3、rtol=1e-4）。禁用Conv/BN折叠后仍有约3.7×10⁻³误差，原因尚未完全定位；PyTorch不同CPU卷积后端也存在约1.6×10⁻³差异。保留原验证阈值，没有将该导出标为成功；骨干单独导出尚未执行。诊断日志保存在上述smoke目录，不能将此图直接作为部署验收结果。
 
 ### ONNX 与硬件边界
 
@@ -111,8 +105,8 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/t
 
 ```bash
 ./scripts/hmnet-python scripts/export_b1_onnx.py --task segmentation \
-  --checkpoint logs/segmentation/efficientvit_b1_cross/best_checkpoint.pth \
-  --output logs/segmentation/efficientvit_b1_cross/onnx
+  --checkpoint logs/segmentation/efficientvit_b1_cross_v21/best_checkpoint.pth \
+  --output logs/segmentation/efficientvit_b1_cross_v21/onnx
 ```
 
 增加 `--backbone-only` 只导出四尺度骨干输出。导出脚本执行PyTorch/ONNX Runtime/onnxsim数值对照。图外仍是Histogram和几何配准，图内无历史状态。FP32归一化和多尺度交互的Dremi算子映射、量化精度尚需后续验证；本实验没有移除除法，也没有替换原官方B1的激活/注意力。
@@ -146,7 +140,7 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/t
 
 ### 恢复与 TensorBoard
 
-恢复时保持原训练的epoch预算、batch、seed和学习率设置，使用上方方案C的 `--resume` 命令。`checkpoint.pth`为最新状态，`best_checkpoint.pth`按开发集mIoU选取。不要用旧相加检查点恢复当前模型。
+恢复时保持原训练的epoch预算、batch、seed和学习率设置，使用上方v2.1的 `--resume` 命令。`checkpoint.pth`为最新状态，`best_checkpoint.pth`按开发集mIoU选取。不要用旧Cross或相加检查点恢复当前模型。
 
 ```bash
 ./scripts/hmnet-python -m tensorboard.main --logdir logs/segmentation --host 127.0.0.1 --port 6006
@@ -155,15 +149,15 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/t
 正式测试集评估（训练方案确定后使用）：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python experiments/segmentation/scripts/test.py \
+CUDA_VISIBLE_DEVICES=1 ./scripts/hmnet-python experiments/segmentation/scripts/test.py \
   experiments/segmentation/config/efficientvit_b1.py test \
   /home/zhaowenyao24/Conda_prj/lab_dataset/DSEC_Semantic/preprocessed/dsec_b1_test \
-  --pretrained logs/segmentation/efficientvit_b1_cross/best_checkpoint.pth
+  --pretrained logs/segmentation/efficientvit_b1_cross_v21/best_checkpoint.pth
 ```
 
 # 原 HMNet 使用说明
 
-以下是原 HMNet 的历史说明。其 B1/B3 命名、论文指标、训练策略及相对路径不属于上方 EfficientViT-B1 基线。当前 B1 请使用上方方案 C 命令；历史命令需按原实验目录布局执行，不能默认从仓库根目录照抄。
+以下是原 HMNet 的历史说明。其 B1/B3 命名、论文指标、训练策略及相对路径不属于上方 EfficientViT-B1 基线。当前 B1 请使用上方v2.1命令；历史命令需按原实验目录布局执行，不能默认从仓库根目录照抄。
 
 # Dataset Preparation
 

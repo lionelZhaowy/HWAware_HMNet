@@ -312,7 +312,7 @@ def main(args):
         classes=NAMES,
         precision="FP32",
         modality=cfg.modality,
-        fusion_mode="cross_stage" if cfg.modality == "rgbdvs" else "none",
+        fusion_mode="cross_stage_post_mbconv" if cfg.modality == "rgbdvs" else "none",
         parameters=sum(p.numel() for p in model.parameters()),
         evaluated=metrics(sum(cs.values())),
         sequences={s: dict(frames=counts[s], **metrics(cs[s])) for s in seqs},

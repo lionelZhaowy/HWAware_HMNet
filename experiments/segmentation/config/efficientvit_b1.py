@@ -25,7 +25,7 @@ class TrainSettings:
     workers = 8
     # One prefetched batch per worker limits memory across three experiments.
     prefetch_factor = 1
-    output = str(ROOT / "logs/segmentation/efficientvit_b1_cross")
+    output = str(ROOT / "logs/segmentation/efficientvit_b1_cross_v21")
     cache = (
         "/home/zhaowenyao24/Conda_prj/lab_dataset/DSEC_Semantic/preprocessed/dsec_b1"
     )
