@@ -45,8 +45,18 @@ def export(args):
         "depth_eventscape": (256, 512),
         "depth_mvsec": (260, 346),
     }[args.task]
-    model = build_frame_task(task, mvsec=args.task == "depth_mvsec").eval()
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    contract = ckpt.get("training_contract", {})
+    saved_mode = contract.get("fusion_mode")
+    requested_mode = getattr(args, "fusion_mode", None)
+    if requested_mode and saved_mode and requested_mode != saved_mode:
+        raise ValueError("Export fusion mode differs from the checkpoint contract")
+    fusion_mode = requested_mode or saved_mode or "add"
+    model = build_frame_task(
+        task, mvsec=args.task == "depth_mvsec",
+        modality=contract.get("modality"),
+        fusion_mode=fusion_mode if fusion_mode != "none" else "add",
+    ).eval()
     model.load_state_dict(ckpt.get("state_dict", ckpt), strict=True)
     wrapper = FrameGraph(model, task, h, w, args.backbone_only).eval()
     # Counts use the actual input domain; RGB uses normalized intensities.
@@ -96,8 +106,12 @@ def export(args):
         ort.InferenceSession(str(p), options, providers=["CPUExecutionProvider"])
         for p in (path, simple)
     ]
-    checks = []
-    for test_inputs in (inputs, tuple(torch.zeros_like(x) for x in inputs)):
+    checks, failures = [], []
+    cases = [("sample" if args.sample else "synthetic", inputs),
+             ("all_zero", tuple(torch.zeros_like(x) for x in inputs))]
+    if task == "segmentation":
+        cases.append(("empty_event", (torch.zeros_like(inputs[0]), inputs[1])))
+    for case, test_inputs in cases:
         with torch.no_grad():
             expected = wrapper(*test_inputs)
         expected = expected if isinstance(expected, tuple) else (expected,)
@@ -106,25 +120,46 @@ def export(args):
         for j, want in enumerate(expected):
             want = want.numpy()
             for label, got in zip(("original", "simplified"), [v[j] for v in values]):
-                # FP32 convolution/BN folding can amplify rounding near zero logits.
+                # FP32 backend differences may be amplified by normalized attention.
                 # Record the actual error and segmentation decisions, not only pass/fail.
                 atol = 1e-3 if task == "segmentation" else 1e-4
-                np.testing.assert_allclose(got, want, atol=atol, rtol=1e-4)
+                finite = bool(np.isfinite(got).all() and np.isfinite(want).all())
+                close = finite and bool(np.allclose(got, want, atol=atol, rtol=1e-4))
                 check = dict(
+                    input_case=case,
                     graph=label,
                     output=outputs[j],
                     max_abs_error=float(np.max(np.abs(got - want))),
                     mean_abs_error=float(np.mean(np.abs(got - want))),
                     atol=atol,
                     rtol=1e-4,
+                    finite=finite,
+                    passed=close,
+                    mismatch_fraction=float(np.mean(
+                        ~np.isfinite(got) | ~np.isfinite(want)
+                        | (np.abs(got - want) > atol + 1e-4 * np.abs(want))
+                    )),
                 )
                 if task == "segmentation" and not args.backbone_only:
                     check["argmax_agreement"] = float(np.mean(got.argmax(1) == want.argmax(1)))
-                    assert check["argmax_agreement"] >= 0.9999
+                    check["passed"] &= check["argmax_agreement"] >= 0.9999
                 checks.append(check)
-            np.testing.assert_allclose(values[0][j], values[1][j], atol=1e-5, rtol=1e-4)
+                if not check["passed"]:
+                    failures.append(f"{case}/{outputs[j]}/{label}: PyTorch mismatch")
+            # Keep the stricter original-vs-simplified check, but finish all
+            # cases and write diagnostics BEFORE reporting a failed export.
+            simplification_ok = bool(
+                np.isfinite(values[0][j]).all() and np.isfinite(values[1][j]).all()
+                and np.allclose(values[0][j], values[1][j], atol=1e-5, rtol=1e-4)
+            )
+            if not simplification_ok:
+                failures.append(f"{case}/{outputs[j]}: simplification mismatch")
     report = dict(
+        passed=not failures,
+        failures=failures,
+        sample=args.sample,
         task=args.task,
+        fusion_mode=model.backbone.fusion_mode,
         checkpoint=args.checkpoint,
         checkpoint_sha256=hashlib.sha256(Path(args.checkpoint).read_bytes()).hexdigest(),
         shape=[h, w],
@@ -138,6 +173,11 @@ def export(args):
     )
     (out / (stem + ".report.json")).write_text(json.dumps(report, indent=2))
     print(json.dumps(report), flush=True)
+    if failures:
+        raise RuntimeError(
+            f"ONNX numerical validation failed; graphs are diagnostic only. "
+            f"See {out / (stem + '.report.json')}: " + "; ".join(failures)
+        )
 
 
 if __name__ == "__main__":
@@ -147,8 +187,10 @@ if __name__ == "__main__":
         choices=["segmentation", "detection", "depth_eventscape", "depth_mvsec"],
         required=True,
     )
+    p.add_argument("--fusion-mode", choices=("add", "adaptive_add", "cross_stage_post_mbconv",
+                                              "cross_stage_post_mbconv_no_feedback"))
     p.add_argument("--checkpoint", required=True)
-    p.add_argument("--output", default="logs/onnx/efficientvit_b1")
+    p.add_argument("--output", default="artifacts/onnx/efficientvit_b1")
     p.add_argument("--sample")
     p.add_argument("--backbone-only", action="store_true")
     export(p.parse_args())
