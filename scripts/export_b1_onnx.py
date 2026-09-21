@@ -45,10 +45,18 @@ def export(args):
         "depth_eventscape": (256, 512),
         "depth_mvsec": (260, 346),
     }[args.task]
-    model = build_frame_task(
-        task, mvsec=args.task == "depth_mvsec"
-    ).eval()
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    contract = ckpt.get("training_contract", {})
+    saved_mode = contract.get("fusion_mode")
+    requested_mode = getattr(args, "fusion_mode", None)
+    if requested_mode and saved_mode and requested_mode != saved_mode:
+        raise ValueError("Export fusion mode differs from the checkpoint contract")
+    fusion_mode = requested_mode or saved_mode or "add"
+    model = build_frame_task(
+        task, mvsec=args.task == "depth_mvsec",
+        modality=contract.get("modality"),
+        fusion_mode=fusion_mode if fusion_mode != "none" else "add",
+    ).eval()
     model.load_state_dict(ckpt.get("state_dict", ckpt), strict=True)
     wrapper = FrameGraph(model, task, h, w, args.backbone_only).eval()
     # Counts use the actual input domain; RGB uses normalized intensities.
@@ -151,7 +159,7 @@ def export(args):
         failures=failures,
         sample=args.sample,
         task=args.task,
-        fusion_mode="cross_stage_post_mbconv" if task == "segmentation" else "none",
+        fusion_mode=model.backbone.fusion_mode,
         checkpoint=args.checkpoint,
         checkpoint_sha256=hashlib.sha256(Path(args.checkpoint).read_bytes()).hexdigest(),
         shape=[h, w],
@@ -179,8 +187,10 @@ if __name__ == "__main__":
         choices=["segmentation", "detection", "depth_eventscape", "depth_mvsec"],
         required=True,
     )
+    p.add_argument("--fusion-mode", choices=("add", "adaptive_add", "cross_stage_post_mbconv",
+                                              "cross_stage_post_mbconv_no_feedback"))
     p.add_argument("--checkpoint", required=True)
-    p.add_argument("--output", default="logs/onnx/efficientvit_b1")
+    p.add_argument("--output", default="artifacts/onnx/efficientvit_b1")
     p.add_argument("--sample")
     p.add_argument("--backbone-only", action="store_true")
     export(p.parse_args())

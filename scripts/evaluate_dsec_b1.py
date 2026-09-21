@@ -153,6 +153,9 @@ def main(args):
     cfg = load_config(args.config, "b1_assessment").TestSettings()
     model = cfg.get_model().cuda().eval()
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    saved_mode = ckpt.get("training_contract", {}).get("fusion_mode")
+    if saved_mode is not None and saved_mode != model.backbone.fusion_mode:
+        raise ValueError("Evaluation fusion mode differs from checkpoint contract")
     model.load_state_dict(ckpt["state_dict"], strict=True)
     checkpoint_step = ckpt["step"]
     del ckpt
@@ -312,7 +315,7 @@ def main(args):
         classes=NAMES,
         precision="FP32",
         modality=cfg.modality,
-        fusion_mode="cross_stage_post_mbconv" if cfg.modality == "rgbdvs" else "none",
+        fusion_mode=model.backbone.fusion_mode,
         parameters=sum(p.numel() for p in model.parameters()),
         evaluated=metrics(sum(cs.values())),
         sequences={s: dict(frames=counts[s], **metrics(cs[s])) for s in seqs},

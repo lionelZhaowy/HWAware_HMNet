@@ -1,10 +1,10 @@
-# EfficientViT-B1 分割：v2.1 完整交互块（方案 B）
+# HWAware_HMNet_Seg_RGBDVS_640x440_v2.1.1：DSEC融合消融
 
-当前工程为 `HWAware_HMNet_Seg_RGBDVS_640x440_v2.1`，分支 `seg_rgbdvs_640x440_v2.1`。RGB+DVS采用标准归一化LiteMLA交叉注意力，并按完整EfficientViTBlock顺序重构：**注意力独立投影＋残差 → 后置MBConv＋残差**。主配置为 [efficientvit_b1.py](config/efficientvit_b1.py)，`efficientvit_b1_cross.py`仅为同配置别名。
+分支 `seg_rgbdvs_640x440_v2.1.1`；从 `HWAware_HMNet_Seg_RGBDVS_640x440_v2.1` 的 `d8037a8` 创建源码副本。当前配置：`fusion_mode=cross_stage_post_mbconv_no_feedback`，BF16、150 epoch、batch32。
 
-这是上一轮讨论中的“方案B：完整块顺序重构”，仍保留骨干内双分支交互，不是更早讨论的“仅在Neck融合”。旧结构保存在其他工程，本工程不兼容旧结构任务权重。新的输出为 `logs/segmentation/efficientvit_b1_cross_v21/`；复制工程时带来的旧logs不会被覆盖。三任务独立训练，检测和深度单模态保持原样；本次没有HWAware、S-FIFO或时序模块。
+**[当前训练/恢复命令、模型公式及验证限制](TRAINING_PRECISION.md)**。正式输出为 `logs/segmentation/efficientvit_b1_cross_v211_bf16/`。请从官方B1预训练初始化，不resume父工程任务检查点或artifacts内的诊断权重。
 
-下面命令均从工程根目录运行。
+公共训练代码、骨干与任务头在v1.2/v3/v2.1.1一致；主配置只选择融合模式和输出路径。旧FP16、300轮、低LR追加实验命令保留于父工程历史版本，不作为本轮默认日程。
 
 ## 1. 数据集准备
 
@@ -30,140 +30,17 @@
 
 增加 `--split test` 会生成独立的 `dsec_b1_test`。预训练文件为本工程 `pretrained/efficientvit_b1_r224.pth`，权重、缓存不进入Git。
 
-## v2.1：骨干阶段内双向交互与后置局部块
+## 评估与导出
 
-配置：[efficientvit_b1.py](config/efficientvit_b1.py)。当前RGB+DVS只实现v2.1结构；从官方ImageNet B1初始化新实验，不resume上一版Cross或旧相加模型。
+正式训练后，在本工程使用 `scripts/evaluate_dsec_b1.py --help` 选择固定检查点和独立artifacts输出；开发集选模后再评估官方test。评估脚本拒绝结构契约不一致的检查点。当前尚未获得正式收敛模型。
 
-### 结构
+此次结构图在 `artifacts/onnx/step3/`，包含整网/骨干、原图/简化图和数值报告。v3有边界输入超差，详见TRAINING_PRECISION.md，不能当成部署验收通过。
 
-各阶段使用原生通道 `32/64/128/256`，空间尺寸为 `110×160、55×80、28×40、14×20`。移除前置IRB；每路直接通过1×1卷积产生Q/K/V。RGB/DVS 参数独立。采用每头16通道，基础尺度和5×5深度卷积聚合尺度（后接按头分组1×1卷积），两尺度分别做注意力后拼接通道。
-
-设 `phi=ReLU`，`N=H×W`，下面按 `[B,heads,N,d]` 记法描述每个尺度：
-
-```text
-S_D = phi(K_D)^T V_D
-z_D = sum_N phi(K_D)
-A_R = phi(Q_R) S_D / (phi(Q_R) z_D + 1e-15)
-A_D 对称地使用 Q_D 与 K_R/V_R
-U_R = R + alpha_R * ConvBN(A_R)
-U_D = D + alpha_D * ConvBN(A_D)
-R′ = U_R + MBConv_R(U_R)
-D′ = U_D + MBConv_D(U_D)
-O  = ReLU(ConvBN(Concat(R′, D′)))
-```
-
-注意力输出投影为2C→C，不再拼接原特征。后置MBConv按官方块设置：stride=1、expansion=4，1×1扩展和3×3深度卷积带bias与HardSwish、无BN；末端1×1投影无bias、带BN、无激活，外部残差。两模态参数独立。
-
-`alpha_R/alpha_D` 保留为各阶段独立的可学习标量，初始化0.1，这是相对官方未缩放残差的保留差异。实现内部采用 `[B,heads,d,N]` 布局，以给 V 添加常数1通道的方式一次计算分子/分母；Q/K使用ReLU，V保留符号。两次矩阵乘法及除法在FP32执行，结果转回输入dtype，再进行后续投影；保留标准LiteMLA除法归一化，没有采用HWAware近似。
-
-**R′/D′ 分别进入两路下一阶段；O 不回灌任何分支。** 每个 O 单独通过1×1Conv+BN+ReLU投影到256通道供原Pyramid使用，辅助头读取融合后的 `/4` 特征。两路更新采用相同阶段的原输入同时计算，不先更新一侧再给另一侧使用。该模块是借鉴LiteMLA和CMX交互思想的新实验结构，不声称复现CMX。
-
-### 数据准备、Train、Test
-
-**数据准备**：直接复用第1节的共享 DSEC 缓存和官方 B1 权重，无需重新生成 Histogram 或配准。
-
-**Train**（用户手动选择空闲GPU启动）：
-
-```bash
-CUDA_VISIBLE_DEVICES=1 ./scripts/hmnet-python experiments/segmentation/scripts/train.py \
-  experiments/segmentation/config/efficientvit_b1.py --single --amp --seed 42
-```
-
-训练超参数为：150 epoch、batch=32、accumulation=1、workers=8、AdamW、5轮预热、lr从2e-4余弦降到2e-6；标签、增强、损失和开发序列不变。输出为 `logs/segmentation/efficientvit_b1_cross_v21/`，与原训练、cooldown平级。TensorBoard使用本README已有命令。
-
-恢复本实验（必须是v2.1检查点）：
-
-```bash
-CUDA_VISIBLE_DEVICES=1 ./scripts/hmnet-python experiments/segmentation/scripts/train.py \
-  experiments/segmentation/config/efficientvit_b1.py --single --amp --seed 42 \
-  --resume logs/segmentation/efficientvit_b1_cross_v21/checkpoint.pth
-```
-
-**Test**（开发集；官方test命令见下方）：
-
-```bash
-CUDA_VISIBLE_DEVICES=1 ./scripts/hmnet-python experiments/segmentation/scripts/test.py \
-  experiments/segmentation/config/efficientvit_b1.py \
-  --pretrained logs/segmentation/efficientvit_b1_cross_v21/best_checkpoint.pth
-```
-
-训练契约和settings使用结构标识 `cross_stage_post_mbconv`；恢复时拒绝旧 `cross_stage` 或相加检查点，测试也严格加载权重。不得用strict=False掩盖结构差异。
-
-### 验证与显存
-
-交互模块训练时默认使用非重入激活重计算，以维持 batch=32、accumulation=1。反向重计算时使用临时 BN 缓冲，避免运行均值、方差和计数被更新两次；测试已对照无重计算实现的输出、梯度和 BN 缓冲。eval/ONNX 不执行重计算。
-
-在RTX 4090 24GB、440×640输入上，已完成真实32样本的两步AMP更新：峰值已分配18.53 GiB、预留19.47 GiB；保留优化器状态时，FP32 eval batch=32峰值约3.20 GiB。模型16,745,838参数。**单卡batch=32可运行，因此不新增多卡路径，保持batch=32、accumulation=1。** 这只是短程显存验证，不是完整训练吞吐或收敛结论。
-
-已验证注意力输出/梯度、后置MBConv位置和两段残差、双分支下一阶段连接、重计算对照（含BN）、预训练加载、FP32/AMP真实样本更新和保存恢复。诊断产物在 `logs/segmentation/efficientvit_b1_cross_v21_smoke/`，不进入Git。
-
-第5轮末（step=1140）ONNX排查结果：5帧真实样本最大logit误差低于9×10⁻⁵、预测完全一致；真实RGB＋空事件也通过原容差。全零输入最大误差约2.16×10⁻³，仍有约0.10%的logit元素超容差。原始ONNX与onnxsim在7组输入上输出完全一致。主要误差放大位于DVS stage4最后一个**原版LiteMLA**：稀疏Q中的小分量对前序FP32扰动敏感，FP64交叉对照已复现；该位置分母约0.38，不是接近epsilon。没有修改训练模型或放宽阈值。
-
-- [详细排查与复现记录](../../logs/segmentation/onnx_diagnosis_epoch5/ONNX数值差异排查.md)
-- [完整模型（onnxsim，仅供结构检查）](../../logs/segmentation/onnx_diagnosis_epoch5/onnx/segmentation.sim.onnx)
-- [数值报告（passed=false）](../../logs/segmentation/onnx_diagnosis_epoch5/onnx/segmentation.report.json)
-
-导出脚本现在会完成全部测试并保存报告，再对超容差结果报错；不会将边界输入失败标为成功。此图尚未通过完整部署验收。所有检查使用固定权重副本，未中断训练。
-
-### ONNX 与硬件边界
-
-训练完成后导出完整模型及onnxsim版本：
-
-```bash
-./scripts/hmnet-python scripts/export_b1_onnx.py --task segmentation \
-  --checkpoint logs/segmentation/efficientvit_b1_cross_v21/best_checkpoint.pth \
-  --output logs/segmentation/efficientvit_b1_cross_v21/onnx
-```
-
-增加 `--backbone-only` 只导出四尺度骨干输出。导出脚本执行PyTorch/ONNX Runtime/onnxsim数值对照。图外仍是Histogram和几何配准，图内无历史状态。FP32归一化和多尺度交互的Dremi算子映射、量化精度尚需后续验证；本实验没有移除除法，也没有替换原官方B1的激活/注意力。
-
-### TrainSettings 参数
-
-| 参数 | 设置与含义 |
-|---|---|
-| `modality` | 唯一的模态变量：`rgbdvs` / `rgb` / `dvs`。 |
-| `epochs` | 150个数据轮次；由实际DataLoader长度自动换算。 |
-| `updates` | `None`；指定正整数时改用累计优化器更新预算。正式对照不覆盖。 |
-| `batch_size` | 32；每次前向/反向32个样本，最后不足一批保留。 |
-| `accumulation` | 1；每个有效小批次更新一次，有效batch通常32。 |
-| `learning_rate` | AdamW峰值学习率 `2e-4`。 |
-| `lr_schedule` | `warmup_cosine`：线性预热后余弦下降。 |
-| `warmup_epochs` | 5轮，对应1140次更新。 |
-| `warmup_start_factor` | 0.1，首次更新lr=`2e-5`，预热末尾到`2e-4`。 |
-| `min_learning_rate` | `2e-6`，150轮最后一次更新时到达。 |
-| `weight_decay` | 0.01。 |
-| `workers` | 8个数据加载进程，训练和验证共用。 |
-| `prefetch_factor` | 1；每个worker预取一批，限制三实验并行时的主机内存。 |
-| `eval_every_epochs` | 1；每轮验证，另在第1次更新和结束时验证。 |
-| `eval_batch_size` | 32；控制训练中验证的显存，不影响训练batch。 |
-| `overfit` | 0表示全训练集；正整数限制前N个样本并禁用翻转，仅供调试。 |
-| `pretrained` | 官方ImageNet初始化路径，不是任务resume检查点。 |
-| `resume` | 默认空；新实验从头初始化。 |
-| `cache` | 上述共享训练/dev缓存。 |
-| `output` | 本工程的独立logs目录。 |
-
-7295样本、batch=32得到每轮228批，150轮共 **34200次更新**。所有LR按成功优化器更新推进；AMP溢出重试不推进LR，会略增加实际数据遍历量。固定seed=42、11类、ignore=255、主/辅助CE权重1.0/0.4。
-
-### 恢复与 TensorBoard
-
-恢复时保持原训练的epoch预算、batch、seed和学习率设置，使用上方v2.1的 `--resume` 命令。`checkpoint.pth`为最新状态，`best_checkpoint.pth`按开发集mIoU选取。不要用旧Cross或相加检查点恢复当前模型。
-
-```bash
-./scripts/hmnet-python -m tensorboard.main --logdir logs/segmentation --host 127.0.0.1 --port 6006
-```
-
-正式测试集评估（训练方案确定后使用）：
-
-```bash
-CUDA_VISIBLE_DEVICES=1 ./scripts/hmnet-python experiments/segmentation/scripts/test.py \
-  experiments/segmentation/config/efficientvit_b1.py test \
-  /home/zhaowenyao24/Conda_prj/lab_dataset/DSEC_Semantic/preprocessed/dsec_b1_test \
-  --pretrained logs/segmentation/efficientvit_b1_cross_v21/best_checkpoint.pth
-```
+---
 
 # 原 HMNet 使用说明
 
-以下是原 HMNet 的历史说明。其 B1/B3 命名、论文指标、训练策略及相对路径不属于上方 EfficientViT-B1 基线。当前 B1 请使用上方v2.1命令；历史命令需按原实验目录布局执行，不能默认从仓库根目录照抄。
+以下是原 HMNet 的历史说明。其 B1/B3 命名、论文指标、训练策略及相对路径不属于上方 EfficientViT-B1 基线。当前 B1 请使用上方第 1–3 节；历史命令需按原实验目录布局执行，不能默认从仓库根目录照抄。
 
 # Dataset Preparation
 

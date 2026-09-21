@@ -103,7 +103,7 @@ class CrossModalLiteMLA(nn.Module):
         # restoring references avoids in-place changes to autograd-saved tensors.
         saved = []
         for module in self.modules():
-            if isinstance(module, nn.BatchNorm2d):
+            if isinstance(module, (nn.BatchNorm2d, nn.SyncBatchNorm)):
                 buffers = (module.running_mean, module.running_var, module.num_batches_tracked)
                 saved.append((module, buffers))
                 module.running_mean, module.running_var, module.num_batches_tracked = (
