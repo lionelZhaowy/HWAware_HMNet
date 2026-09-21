@@ -45,6 +45,8 @@ parser.add_argument('--node'  , type=str, default='1/1'      , help='[DDP] Speci
                                                                      Master node must have node index = 1.\
                                                                      Specify "1/1" for single node DDP (default)')
 # Frame B1 overrides; normal runs read TrainSettings directly.
+parser.add_argument('--precision', choices=('fp32', 'bf16', 'fp16'), help='B1: explicit training precision; --amp alone retains FP16')
+parser.add_argument('--stop-after', type=int, help='B1 diagnostic: save and stop at this update without changing the LR budget')
 parser.add_argument('--epochs', type=int, help='B1: total data epochs (clears explicit updates)')
 parser.add_argument('--updates', type=int, help='B1: total optimizer updates instead of epochs')
 parser.add_argument('--resume', type=str, help='B1: resume a task checkpoint')
