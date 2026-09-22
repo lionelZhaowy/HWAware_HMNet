@@ -75,9 +75,9 @@ class HMSeg(BlockBase):
         self.seg_head = self.seg_head.to(d0)
         self.aux_head = self.aux_head.to(d0)
 
-    def forward(self, list_events, list_images, list_image_metas, list_gt, init_states=True) -> Tensor:
+    def forward(self, list_events, list_images, list_image_metas, list_gt, init_states=True, temporal_state=None) -> Tensor:
         if is_frame_model(self):
-            return frame_loss(self, list_events, list_images, list_image_metas, list_gt, 'segmentation')
+            return frame_loss(self, list_events, list_images, list_image_metas, list_gt, 'segmentation', temporal_state=temporal_state)
         if init_states:
             self.idx_offset = 0
 
@@ -103,9 +103,9 @@ class HMSeg(BlockBase):
 
         return outputs
 
-    def inference(self, list_events, list_images, list_image_metas, speed_test=False) -> Tensor:
+    def inference(self, list_events, list_images, list_image_metas, speed_test=False, temporal_state=None) -> Tensor:
         if is_frame_model(self):
-            return frame_inference(self, list_events, list_images, list_image_metas, 'segmentation')
+            return frame_inference(self, list_events, list_images, list_image_metas, 'segmentation', temporal_state=temporal_state)
         output = []
         output_image_metas = []
         d0 = self.devices[0]

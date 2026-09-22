@@ -1,3 +1,11 @@
+# v2.1.1_T时序实验入口
+
+本工程为v2.1.1的独立M=2 DVS时序实验，融合保持无主干反馈的交叉LiteMLA。只在新_T工程修改，公共时序实现与另一_T工程一致。
+
+以[本实验训练/恢复/评估/ONNX说明](TRAINING_PRECISION.md)为准。该文包含连续采样、FP32状态、BF16训练、TBPTT=1和已知ONNX数值限制。下文为继承的历史说明，旧输出路径/无状态描述不代表本实验默认配置。
+
+---
+
 # HWAware_HMNet_Seg_RGBDVS_640x440_v2.1.1：DSEC融合消融
 
 分支 `seg_rgbdvs_640x440_v2.1.1`；从 `HWAware_HMNet_Seg_RGBDVS_640x440_v2.1` 的 `d8037a8` 创建源码副本。当前配置：`fusion_mode=cross_stage_post_mbconv_no_feedback`，BF16、150 epoch、batch32。

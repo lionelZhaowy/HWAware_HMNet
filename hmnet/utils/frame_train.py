@@ -1,4 +1,4 @@
-"""Independent-window training: FP32/BF16/FP16, single GPU or segmentation DDP."""
+"""Frame/sequence training: FP32/BF16/FP16, single GPU or segmentation DDP."""
 
 import json
 import math
@@ -17,6 +17,8 @@ from hmnet.utils.frame_distributed import DistributedRun, GlobalBatchSampler, va
 from torch.utils.tensorboard import SummaryWriter
 from hmnet.dataset.custom_collate_fn import collate_keep_dict
 from hmnet.utils.common import fix_seed
+from hmnet.dataset.temporal_frames import SequenceBatchSampler, manifest_signature
+from hmnet.utils.temporal_streams import TemporalStreams
 
 
 def unpack(batch, task):
@@ -47,6 +49,11 @@ def unpack(batch, task):
 def evaluate_seg(model, dataset, batch_size=2, workers=0, prefetch_factor=1, runtime=None):
     model.eval()
     confusion = torch.zeros(11, 11, dtype=torch.int64)
+    temporal = bool(getattr(model.backbone, "temporal_window", 0))
+    sequence_sampler = (SequenceBatchSampler(dataset, batch_size,
+        runtime.rank if runtime else 0, runtime.world_size if runtime else 1,
+        training=False) if temporal else None)
+    streams = TemporalStreams(model.backbone, batch_size) if temporal else None
     sampler = None
     if runtime is not None and runtime.distributed:
         sampler = range(runtime.rank, len(dataset), runtime.world_size)
@@ -54,15 +61,20 @@ def evaluate_seg(model, dataset, batch_size=2, workers=0, prefetch_factor=1, run
         workers = runtime.workers(workers)
     for batch in DataLoader(
         dataset,
-        batch_size=batch_size,
-        sampler=sampler,
+        **(dict(batch_sampler=sequence_sampler) if temporal else
+           dict(batch_size=batch_size, sampler=sampler)),
         collate_fn=collate_keep_dict,
         num_workers=workers,
         pin_memory=True,
         **({"prefetch_factor": prefetch_factor} if workers > 0 else {}),
     ):
         events, images, metas, labels = unpack(batch, "segmentation")
-        pred, _ = model.inference(events, images, metas)
+        if temporal:
+            pred, _, current = model.inference(events, images, metas,
+                                               temporal_state=streams.select(metas))
+            streams.commit(metas, current)
+        else:
+            pred, _ = model.inference(events, images, metas)
         pred = pred.argmax(1).cpu()
         gt = torch.stack(labels)
         valid = (gt >= 0) & (gt < 11)
@@ -215,10 +227,14 @@ def _run(config, args, runtime):
         raise FileExistsError(f"{output}: use --output, --resume, or --overwrite")
     dataset = config.get_dataset()
     generator = torch.Generator()
-    sampler = GlobalBatchSampler(
-        RandomSampler(dataset, generator=generator), config.batch_size,
-        runtime.rank, runtime.world_size,
-    )
+    temporal = bool(getattr(config, "temporal_window", 0))
+    if temporal and (config.task != "segmentation" or config.accumulation != 1):
+        raise ValueError("Temporal first experiment requires segmentation and accumulation=1")
+    sampler = (SequenceBatchSampler(dataset, config.batch_size, runtime.rank,
+                                   runtime.world_size, training=True, seed=args.seed)
+               if temporal else GlobalBatchSampler(
+                   RandomSampler(dataset, generator=generator), config.batch_size,
+                   runtime.rank, runtime.world_size))
     workers = runtime.workers(config.workers)
     loader = DataLoader(
         dataset, batch_sampler=sampler, num_workers=workers,
@@ -244,6 +260,10 @@ def _run(config, args, runtime):
         seed=args.seed,
         data_root=str(getattr(config, "cache", getattr(config, "data_root", ""))),
     )
+    if temporal:
+        contract["temporal"] = dict(window=2, branch="dvs", state_dtype="float32",
+            reduction_dtype="float32", tbptt=1, sampler="balanced_sequence_lanes_v1",
+            reset_gap_us=75000, manifest_sha256=manifest_signature(dataset))
     if runtime.primary:
         print(json.dumps(dict(training_contract=contract, batches_per_epoch=len(loader),
                               resolved_updates=max_updates, local_batch=config.batch_size // runtime.world_size)), flush=True)
@@ -257,6 +277,7 @@ def _run(config, args, runtime):
                                         broadcast_buffers=False)
     else:
         model = raw_model
+    streams = TemporalStreams(raw_model.backbone, config.batch_size) if temporal else None
     # Distinct dropout streams, reproducible via per-rank checkpoint RNG.
     fix_seed(args.seed + runtime.rank)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate,
@@ -292,6 +313,11 @@ def _run(config, args, runtime):
         step, epoch, cursor = ckpt["step"], ckpt["data_epoch"], ckpt["data_cursor"]
         best_miou, best_step = ckpt.get("best_miou", -1.), ckpt.get("best_step", 0)
         runtime.restore_rng(ckpt["rng_by_rank"])
+        if temporal:
+            saved_streams = ckpt.get("temporal_by_rank", [])
+            if len(saved_streams) != runtime.world_size:
+                raise ValueError("Missing or mismatched temporal resume state")
+            streams.load_state_dict(saved_streams[runtime.rank])
         if new_stage:
             step, best_miou, best_step = 0, -1., 0
         del ckpt
@@ -327,6 +353,8 @@ def _run(config, args, runtime):
         data_epoch = start_epoch
         while True:
             generator.manual_seed(args.seed + data_epoch)
+            if temporal:
+                sampler.set_epoch(data_epoch)
             if hasattr(dataset, "set_epoch"):
                 dataset.set_epoch(data_epoch, args.seed)
             for idx, batch in enumerate(loader):
@@ -366,8 +394,15 @@ def _run(config, args, runtime):
                         raise ValueError("DDP batch has a rank with no valid labels; use fewer GPUs")
                     weight = runtime.world_size * pixels / total_pixels
                 with torch.amp.autocast("cuda", enabled=amp, dtype=amp_dtype):
-                    result = model(*unpack(batch, config.task))
+                    unpacked = unpack(batch, config.task)
+                    result = model(*unpacked, **(dict(temporal_state=streams.select(unpacked[2]))
+                                                if temporal else {}))
                     loss = result["loss"]
+                if temporal:
+                    streams.commit(unpacked[2], result["temporal_state"])
+                    # The external bank owns detached state; do not retain the
+                    # output-state autograd graph across optimizer updates.
+                    del result["temporal_state"]
                 if result.get("skip_step", False):
                     continue
                 if not runtime.all_true(bool(torch.isfinite(loss))):
@@ -427,12 +462,21 @@ def _run(config, args, runtime):
             if (is_best or step % eval_interval == 0 or step == max_updates
                     or (getattr(args, "stop_after", None) is not None and step >= args.stop_after)):
                 rng_by_rank = runtime.gather_rng()
+                temporal_by_rank = None
+                if temporal:
+                    local_state = streams.state_dict()
+                    temporal_by_rank = [None]*runtime.world_size
+                    if runtime.distributed:
+                        dist.all_gather_object(temporal_by_rank, local_state)
+                    else:
+                        temporal_by_rank[0] = local_state
                 if runtime.primary:
                     checkpoint = dict(
                         state_dict=raw_model.state_dict(), training_contract=contract,
                         stage_parent=stage_parent, best_miou=best_miou, best_step=best_step,
                         optimizer=optimizer.state_dict(), scaler=scaler.state_dict(), step=step,
                         data_epoch=epoch, data_cursor=cursor, rng_by_rank=rng_by_rank,
+                        temporal_by_rank=temporal_by_rank,
                     )
                     temp = output / "checkpoint.tmp.pth"
                     torch.save(checkpoint, temp)
@@ -445,6 +489,8 @@ def _run(config, args, runtime):
             # Optional bounded diagnostics stop without changing the LR budget.
             if getattr(args, "stop_after", None) is not None and step >= args.stop_after:
                 break
+    # Close the generator before returning so bounded diagnostics stop loader workers.
+    iterator.close()
     return raw_model
 
 
@@ -475,7 +521,11 @@ def run_seg_evaluation(config, args):
     checkpoint = args.pretrained or str(Path(config.output) / "checkpoint.pth")
     if not args.random_init:
         state = torch.load(checkpoint, map_location="cpu", weights_only=False)
-        saved_mode = state.get("training_contract", {}).get("fusion_mode")
+        saved_contract = state.get("training_contract", {})
+        saved_window = saved_contract.get("temporal", {}).get("window", 0)
+        if saved_window != getattr(model.backbone, "temporal_window", 0):
+            raise ValueError("Evaluation temporal architecture differs from checkpoint")
+        saved_mode = saved_contract.get("fusion_mode")
         if saved_mode is not None and saved_mode != model.backbone.fusion_mode:
             raise ValueError("Evaluation fusion mode differs from checkpoint contract")
         model.load_state_dict(state.get("state_dict", state), strict=True)

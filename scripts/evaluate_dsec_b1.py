@@ -151,6 +151,8 @@ def main(args):
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
     cfg = load_config(args.config, "b1_assessment").TestSettings()
+    if getattr(cfg, "temporal_window", 0):
+        raise ValueError("Temporal evaluation uses segmentation/scripts/test.py and the sequence sampler")
     model = cfg.get_model().cuda().eval()
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     saved_mode = ckpt.get("training_contract", {}).get("fusion_mode")

@@ -47,6 +47,8 @@ def export(args):
     }[args.task]
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     contract = ckpt.get("training_contract", {})
+    if contract.get("temporal"):
+        raise ValueError("Temporal checkpoints require scripts/export_temporal_onnx.py")
     saved_mode = contract.get("fusion_mode")
     requested_mode = getattr(args, "fusion_mode", None)
     if requested_mode and saved_mode and requested_mode != saved_mode:

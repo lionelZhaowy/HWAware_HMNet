@@ -11,7 +11,7 @@ from hmnet.models.depth import HMDepth
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def build_frame_task(task, pretrained=None, mvsec=False, modality=None, fusion_mode="add"):
+def build_frame_task(task, pretrained=None, mvsec=False, modality=None, fusion_mode="add", temporal_window=0):
     if task not in ("segmentation", "detection", "depth"):
         raise ValueError(task)
     name = "hmnet_B3_yolox.py" if task == "detection" else "hmnet_B3.py"
@@ -24,6 +24,7 @@ def build_frame_task(task, pretrained=None, mvsec=False, modality=None, fusion_m
         pretrained=pretrained,
         modality=modality,
         fusion_mode=fusion_mode,
+        temporal_window=temporal_window,
     )
     neck = copy.deepcopy(base.neck)
     # Fuse all four scales. YOLOX consumes /8,/16,/32; dense prediction uses /4.
