@@ -1,4 +1,4 @@
-"""DSEC frame segmentation: configurable RGB/DVS modality, no recurrent state."""
+"""DSEC frame segmentation: configurable RGB/DVS modality, DVS LiteMLA M=2 state."""
 
 from hmnet.models.efficientvit_tasks import build_frame_task, ROOT
 from hmnet.dataset.dsec_frames import DSECFrames
@@ -10,6 +10,7 @@ class TrainSettings:
     modality = "rgbdvs"
     fusion_mode = "add"
     precision = "bf16"
+    temporal_window = 2
     # Normal training uses epochs; explicit updates take priority.
     epochs = 150
     updates = None
@@ -27,7 +28,7 @@ class TrainSettings:
     workers = 8
     # One prefetched batch per worker limits memory across three experiments.
     prefetch_factor = 1
-    output = str(ROOT / "logs/segmentation/efficientvit_b1_add_v12_bf16")
+    output = str(ROOT / "logs/segmentation/efficientvit_b1_add_v12_T_bf16")
     cache = (
         "/home/zhaowenyao24/Conda_prj/lab_dataset/DSEC_Semantic/preprocessed/dsec_b1"
     )
@@ -40,6 +41,7 @@ class TrainSettings:
             self.pretrained,
             modality=self.modality,
             fusion_mode=self.fusion_mode,
+            temporal_window=self.temporal_window,
         )
 
     def get_dataset(self):

@@ -37,6 +37,9 @@ class DSECFrames(Dataset):
         return len(self.samples)
 
     def __getitem__(self, index):
+        temporal_key = index if isinstance(index, tuple) else None
+        if temporal_key is not None:
+            index, stream_slot, reset, flip = temporal_key
         sample = self.samples[index]
         with np.load(self.root / sample["file"]) as f:
             hist = torch.from_numpy(f["histogram"].copy()).float()
@@ -48,7 +51,9 @@ class DSECFrames(Dataset):
             generator = torch.Generator().manual_seed(
                 self.augmentation_seed + self.augmentation_epoch * len(self) + index
             )
-        if self.augment and torch.rand((), generator=generator) < 0.5:
+        do_flip = (bool(flip) if temporal_key is not None else
+                   self.augment and bool(torch.rand((), generator=generator) < 0.5))
+        if do_flip:
             hist, rgb, label = (x.flip(-1) for x in (hist, rgb, label))
         rgb = (
             rgb - rgb.new_tensor([0.485, 0.456, 0.406])[:, None, None]
@@ -61,4 +66,7 @@ class DSECFrames(Dataset):
             curr_time_org=sample["target_us"],
             rgb_time=sample["rgb_us"],
         )
+        if temporal_key is not None:
+            meta.update(sequence=sample["sequence"], stream_slot=stream_slot,
+                        reset=reset, flipped=do_flip, sample_index=index)
         return dict(events=hist, images=rgb), dict(labels=label), dict(image_meta=meta)
