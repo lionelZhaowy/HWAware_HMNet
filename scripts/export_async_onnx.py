@@ -35,6 +35,9 @@ class EventGraph(nn.Module):
 
 
 def export_graph(wrapper,inputs,names,outputs,path):
+    # torch.onnx.export restores the wrapper's original training flag, recursively.
+    # Explicit eval prevents shape inspection from updating the shared model's BN.
+    wrapper.eval()
     with torch.no_grad():
         torch.onnx.export(wrapper,inputs,str(path),opset_version=17,input_names=names,
                           output_names=outputs,do_constant_folding=True,dynamo=False)
