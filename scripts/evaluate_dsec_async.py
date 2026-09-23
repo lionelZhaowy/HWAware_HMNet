@@ -13,7 +13,7 @@ if __name__=="__main__":
     p.add_argument("--checkpoint",required=True);p.add_argument("--data-root",required=True)
     p.add_argument("--output",required=True);p.add_argument("--device",default="cuda:0")
     p.add_argument("--split",choices=("train","dev","test"),default="dev")
-    p.add_argument("--rgb-delay-frames",type=int,default=0)
+    p.add_argument("--rgb-delay-frames",type=int,choices=(0,1),default=0)
     p.add_argument("--rgb-keep-every",type=int,choices=(1,2),default=1,help="2: controlled 20-to-10Hz RGB thinning")
     p.add_argument("--workers",type=int,default=2);p.add_argument("--limit",type=int)
     p.add_argument("--save-predictions",action="store_true")
