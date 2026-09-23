@@ -6,6 +6,7 @@ class TemporalStreams:
     def __init__(self, backbone, capacity):
         self.memory = backbone.zero_temporal_state(capacity)
         self.last = [None]*capacity
+        self.last_rgb = [None]*capacity
 
     def select(self, metas):
         ids=[int(m["stream_slot"]) for m in metas]
@@ -30,10 +31,15 @@ class TemporalStreams:
                 raise FloatingPointError("Temporal state must stay finite FP32")
             bank.index_copy_(0,ids,value.detach())
         for m in metas:
-            self.last[int(m["stream_slot"])]=(m["sequence"],int(m["curr_time_org"]),bool(m["flipped"]))
+            slot = int(m["stream_slot"])
+            self.last[slot]=(m["sequence"],int(m["curr_time_org"]),bool(m["flipped"]))
+            if "steps" in m:
+                end = m["steps"][-1]
+                self.last_rgb[slot] = dict(rgb_id=end["rgb_id"],rgb_time=end["rgb_time"],
+                                          rgb_valid=end["rgb_valid"])
 
     def state_dict(self):
-        return dict(memory=[s.detach().cpu() for s in self.memory],last=list(self.last))
+        return dict(memory=[s.detach().cpu() for s in self.memory],last=list(self.last),rgb_sources=list(self.last_rgb))
 
     def load_state_dict(self, state):
         values=state["memory"]
@@ -44,3 +50,5 @@ class TemporalStreams:
                 raise ValueError("Invalid checkpoint memory")
             bank.copy_(value.to(bank.device))
         self.last=list(state["last"])
+        self.last_rgb=list(state.get("rgb_sources",[None]*len(self.last)))
+        if len(self.last_rgb) != len(self.last):raise ValueError("RGB source stream count differs")

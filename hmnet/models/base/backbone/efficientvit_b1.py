@@ -37,7 +37,15 @@ class EfficientViTB1(nn.Module):
             raise ValueError("Temporal DVS requires Add or no-feedback cross fusion")
         self.temporal_window = temporal_window
         if self.use_events:
-            self.event_encoder = efficientvit_backbone_b1(in_channels=event_channels)
+            # Construct the same 20-channel module first for B/C-identical RNG
+            # consumption in every shared layer; adapt only the event stem.
+            self.event_encoder = efficientvit_backbone_b1(in_channels=20)
+            if event_channels != 20:
+                old = self.event_encoder.input_stem.op_list[0].conv
+                with torch.random.fork_rng(devices=[]):
+                    self.event_encoder.input_stem.op_list[0].conv = nn.Conv2d(
+                        event_channels, old.out_channels, old.kernel_size,
+                        old.stride, old.padding, bias=old.bias is not None)
         if self.use_rgb:
             self.rgb_encoder = efficientvit_backbone_b1(in_channels=3)
 
@@ -106,7 +114,7 @@ class EfficientViTB1(nn.Module):
                 or event_hist.ndim != 4
                 or event_hist.shape[1] != self.event_channels
             ):
-                raise ValueError("DVS input must be [B,20,H,W]")
+                raise ValueError(f"DVS input must be [B,{self.event_channels},H,W]")
             if self.use_rgb and (rgb is None or rgb.ndim != 4 or rgb.shape[1] != 3):
                 raise ValueError("RGB input must be [B,3,H,W]")
             if self.fusion and (
@@ -141,6 +149,31 @@ class EfficientViTB1(nn.Module):
                     feature = rgb_feature if feature is None else feature + rgb_feature
             outputs.append(self.relu(feature))
         return (tuple(outputs), next_state) if self.temporal_window else tuple(outputs)
+
+    def encode_rgb(self, rgb):
+        """Cache pre-ReLU RGB projections; Add remains identical to forward()."""
+        if self.fusion_mode != "add":
+            raise ValueError("Async RGB cache currently supports SimpleAdd only")
+        from hmnet.utils.activation_checkpoint import recompute
+        def encode(image):
+            features = self.rgb_encoder(image)
+            return tuple(proj(features[f"stage{i+1}"]) for i, proj in enumerate(self.rgb_proj))
+        return recompute(self, encode, rgb)
+
+    def event_step(self, event_hist, temporal_state):
+        from hmnet.utils.activation_checkpoint import recompute
+        def encode(events, *previous):
+            features, state = encoder_step(self.event_encoder, events, previous)
+            projected = tuple(proj(features[f"stage{i+1}"]) for i, proj in enumerate(self.event_proj))
+            return (*projected, *state)
+        result = recompute(self, encode, event_hist, *temporal_state)
+        return result[:4], result[4:]
+
+    def async_step(self, event_hist, rgb_cache, temporal_state):
+        if self.fusion_mode != "add" or self.temporal_window != 2:
+            raise ValueError("Async step requires SimpleAdd and M=2")
+        event, state = self.event_step(event_hist, temporal_state)
+        return tuple(self.relu(e+r) for e, r in zip(event, rgb_cache)), state
 
     def _forward_cross_stage(self, event_hist, rgb):
         event = self.event_encoder.input_stem(event_hist)

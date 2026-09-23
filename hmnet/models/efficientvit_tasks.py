@@ -11,7 +11,7 @@ from hmnet.models.depth import HMDepth
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def build_frame_task(task, pretrained=None, mvsec=False, modality=None, fusion_mode="add", temporal_window=0):
+def build_frame_task(task, pretrained=None, mvsec=False, modality=None, fusion_mode="add", temporal_window=0, event_channels=20):
     if task not in ("segmentation", "detection", "depth"):
         raise ValueError(task)
     name = "hmnet_B3_yolox.py" if task == "detection" else "hmnet_B3.py"
@@ -25,6 +25,7 @@ def build_frame_task(task, pretrained=None, mvsec=False, modality=None, fusion_m
         modality=modality,
         fusion_mode=fusion_mode,
         temporal_window=temporal_window,
+        event_channels=20,  # Canonical initialization keeps all common B/C parameters identical.
     )
     neck = copy.deepcopy(base.neck)
     # Fuse all four scales. YOLOX consumes /8,/16,/32; dense prediction uses /4.
@@ -43,4 +44,16 @@ def build_frame_task(task, pretrained=None, mvsec=False, modality=None, fusion_m
         positional.append(copy.deepcopy(base.aux_head))
     model = cls(*positional, devices=[torch.device("cuda:0")])
     model.init_weights()
+    if model.backbone.use_events and event_channels != 20:
+        old = model.backbone.event_encoder.input_stem.op_list[0].conv
+        # Adapt after ALL generic/pretrained initialization. A narrower stem
+        # must not shift the RNG sequence used to initialize Neck and Head.
+        with torch.random.fork_rng(devices=[]):
+            new = torch.nn.Conv2d(event_channels, old.out_channels, old.kernel_size,
+                                 old.stride, old.padding, bias=old.bias is not None)
+        with torch.no_grad():
+            new.weight.copy_(old.weight.mean(1,keepdim=True).repeat(1,event_channels,1,1)*(20/event_channels))
+            if old.bias is not None:new.bias.copy_(old.bias)
+        model.backbone.event_encoder.input_stem.op_list[0].conv = new
+        model.backbone.event_channels = event_channels
     return model

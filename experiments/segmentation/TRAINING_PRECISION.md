@@ -1,3 +1,5 @@
+> 本分支当前异步B/C配置和运行命令以 [ASYNC_RGB_DVS.md](ASYNC_RGB_DVS.md) 为准；下文为父版训练记录。
+
 # v1.2_T：DVS LiteMLA M=2训练与验证
 
 本工程独立派生自v1.2，分支`seg_rgbdvs_640x440_v1.2_T`。融合保持SimpleAdd；仅DVS骨干Stage3/4的7个LiteMLA读取当前＋上一帧。RGB骨干、融合算子、Neck/Head、loss和优化器不改。父工程不修改，不复制或续训其活动日志。
