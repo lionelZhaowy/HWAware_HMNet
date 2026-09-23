@@ -48,12 +48,32 @@ CUDA_VISIBLE_DEVICES=1 ./scripts/hmnet-python scripts/train_async.py --single --
 
 输出分别为 `logs/segmentation/efficientvit_b1_v1.2_T_1_stage1/` 与 `...v1.2_T_2_stage1/`。默认每轮验证、保存last/best，TensorBoard在相应 `tensorboard/`。
 
-B续训（C将目录和版本后缀改为 `_2`）：
+B/C续训：在各自工程根目录运行，`--resume`不带路径时自动加载本版本、所选阶段输出目录中的`checkpoint.pth`：
 
 ```bash
+CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python scripts/train_async.py --single --stage 1 --resume
+```
+
+自定义训练输出目录需指定`--output`；也保留显式检查点路径：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python scripts/train_async.py --single --stage 1 --output /path/to/run --resume
 CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python scripts/train_async.py --single --stage 1 \
   --resume logs/segmentation/efficientvit_b1_v1.2_T_1_stage1/checkpoint.pth
 ```
+
+显式路径示例为B，C改成`...v1.2_T_2_stage1/checkpoint.pth`。自动恢复只选择最终输出目录的`checkpoint.pth`，不搜索其他实验、不回退到best；缺失时直接报错，不开始新训练。`--resume`与`--init-from`互斥。
+
+换物理GPU只需改变`CUDA_VISIBLE_DEVICES`，保持原数据、seed、精度、阶段和训练预算。`CUDA_VISIBLE_DEVICES=0`让程序的逻辑`cuda:0`对应物理GPU0；两个独立训练进程可各自在逻辑`cuda:0`运行并共享物理卡。换卡前结束该实验的旧训练进程，避免两个进程写同一输出目录；不需要停止同卡的另一实验。恢复点是最后一次已保存的检查点，当前训练器没有Ctrl+C自动保存功能，未保存的更新会重做。
+
+将C移到GPU0（与B合卡）：
+
+```bash
+cd /home/zhaowenyao24/Conda_prj/Detection_DVS/HWAware_HMNet_Seg_RGBDVS_640x440_v1.2_T_2
+CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python scripts/train_async.py --single --stage 1 --resume
+```
+
+合卡训练保持各自batch32和原超参数；单卡运行的显存实测不能保证两进程所有阶段同时达到峰值时一定足够，启动后观察`nvidia-smi`和日志。
 
 `--resume`恢复同阶段的优化器、LR日程、随机状态、连续流游标和DVS状态；RGB来源可重建。不能跨B/C、数据manifest、batch、seed、精度或阶段恢复。`--stop-after N`仅限诊断：在第N次更新保存退出，保留原总预算。
 
@@ -115,7 +135,7 @@ CUDA_VISIBLE_DEVICES=1 ./scripts/hmnet-python scripts/train_async.py --single --
   --pseudo-weight 0.2
 ```
 
-`--init-from`仅加载对应阶段一权重，重新建立优化器、LR及运行状态。输出为各版本 `..._stage2/`。阶段二续训保持所有参数一致，删除 `--init-from`，改用 `--resume ..._stage2/checkpoint.pth`；保留 `--stage 2 --epochs 20 --pseudo-root ... --pseudo-weight 0.2`。
+`--init-from`仅加载对应阶段一权重，重新建立优化器、LR及运行状态。输出为各版本 `..._stage2/`。阶段二续训保持所有参数一致，删除 `--init-from`，改用无路径 `--resume`（自动选择stage2输出）或 `--resume ..._stage2/checkpoint.pth`；保留 `--stage 2 --epochs 20 --pseudo-root ... --pseudo-weight 0.2`。
 
 ## 评估、旧RGB诊断与导出
 
