@@ -106,7 +106,7 @@ class EfficientViTB1(nn.Module):
                 or event_hist.ndim != 4
                 or event_hist.shape[1] != self.event_channels
             ):
-                raise ValueError("DVS input must be [B,20,H,W]")
+                raise ValueError(f"DVS input must be [B,{self.event_channels},H,W]")
             if self.use_rgb and (rgb is None or rgb.ndim != 4 or rgb.shape[1] != 3):
                 raise ValueError("RGB input must be [B,3,H,W]")
             if self.fusion and (
