@@ -98,7 +98,7 @@ CUDA_VISIBLE_DEVICES=4 ./scripts/hmnet-python experiments/segmentation/scripts/t
 
 图显式输入双通道DVS、3通道RGB及7个FP32历史状态；输出主头logits（或四尺度特征）和7个新状态。外部在序列边界清零，并按流保存状态。导出是FP32推理，不代表BF16/Dremi部署验证。
 
-会生成原图、简化图和JSON报告。checker、真实序列、全零/空事件、多步独立状态轨迹分别检查，沿用atol=1e-3、rtol=1e-4及类别一致率要求。若数值超差，报告仍保存且脚本非零退出，不代表没有生成可供人工查看的结构图。交付时的诊断图在各工程artifacts/onnx/polarity_step3，权重来源及实际验证状态见artifacts/polarity_implementation/README.md。
+会生成原图、简化图和JSON报告。checker、真实序列、全零/空事件、多步独立状态轨迹分别检查，沿用atol=1e-3、rtol=1e-4及类别一致率要求。若数值超差，报告仍保存且脚本非零退出，不代表没有生成可供人工查看的结构图。交付时的诊断图在各工程artifacts/onnx/polarity_initial（官方骨干预训练＋随机任务头，未训练），权重来源及实际验证状态见artifacts/polarity_implementation/README.md。
 
 ## 解释边界
 
