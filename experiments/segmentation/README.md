@@ -1,3 +1,5 @@
+> 本分支当前采用异步RGB–DVS实验，请使用 [ASYNC_RGB_DVS.md](ASYNC_RGB_DVS.md) 的数据、两阶段训练和评估命令。下面保留历史HMNet/同步基线说明。
+
 # v1.2_T时序实验入口
 
 本工程为v1.2的独立M=2 DVS时序实验，融合保持SimpleAdd。只在新_T工程修改，公共时序实现与另一_T工程一致。

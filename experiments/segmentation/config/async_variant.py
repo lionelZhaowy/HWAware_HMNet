@@ -1,0 +1,2 @@
+VARIANT = "C"
+VERSION = "v1.2_T_2"

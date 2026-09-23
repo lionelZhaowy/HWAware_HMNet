@@ -47,6 +47,9 @@ def unpack(batch, task):
 
 @torch.no_grad()
 def evaluate_seg(model, dataset, batch_size=2, workers=0, prefetch_factor=1, runtime=None):
+    if getattr(dataset, "async_data", False):
+        from hmnet.utils.async_evaluation import evaluate_async
+        return evaluate_async(model,dataset,workers=workers,runtime=runtime)
     model.eval()
     confusion = torch.zeros(11, 11, dtype=torch.int64)
     temporal = bool(getattr(model.backbone, "temporal_window", 0))
@@ -217,6 +220,9 @@ def _run(config, args, runtime):
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     fix_seed(args.seed)
+    if getattr(config,"deterministic",False):
+        torch.backends.cudnn.benchmark = False
+        torch.use_deterministic_algorithms(True)
     torch.set_num_threads(4)
     output = Path(config.output)
     output.mkdir(parents=True, exist_ok=True)
@@ -228,6 +234,9 @@ def _run(config, args, runtime):
     dataset = config.get_dataset()
     generator = torch.Generator()
     temporal = bool(getattr(config, "temporal_window", 0))
+    asynchronous = bool(getattr(dataset, "async_data", False))
+    if asynchronous and runtime.distributed:
+        raise ValueError("Async partial RGB updates require single-GPU BN; use --single (global batch stays 32)")
     if temporal and (config.task != "segmentation" or config.accumulation != 1):
         raise ValueError("Temporal first experiment requires segmentation and accumulation=1")
     sampler = (SequenceBatchSampler(dataset, config.batch_size, runtime.rank,
@@ -264,6 +273,12 @@ def _run(config, args, runtime):
         contract["temporal"] = dict(window=2, branch="dvs", state_dtype="float32",
             reduction_dtype="float32", tbptt=1, sampler="balanced_sequence_lanes_v1",
             reset_gap_us=75000, manifest_sha256=manifest_signature(dataset))
+    if asynchronous:
+        contract["deterministic"] = getattr(config,"deterministic",False)
+        contract["asynchronous"] = dataset.contract()
+        contract["async_validation"] = dict(limit=getattr(config,"validation_limit",None),
+                                             precision="bf16",clock="all_event_steps_GT_metrics")
+        contract["temporal"].update(tbptt=2,sampler="balanced_two_step_gt_lanes_v1")
     if runtime.primary:
         print(json.dumps(dict(training_contract=contract, batches_per_epoch=len(loader),
                               resolved_updates=max_updates, local_batch=config.batch_size // runtime.world_size)), flush=True)
@@ -286,8 +301,28 @@ def _run(config, args, runtime):
     step, epoch, cursor = 0, 0, 0
     best_miou, best_step = -1.0, 0
     stage_parent = None
+    if asynchronous and getattr(config,"start_new_stage",False):
+        raise ValueError("Async phase transitions use --init-from, not legacy start_new_stage")
     if getattr(config, "start_new_stage", False) and not config.resume:
         raise ValueError("A new training stage requires --resume with a full checkpoint")
+    if getattr(config,"init_from",None):
+        if config.resume:
+            raise ValueError("--init-from starts phase 2; --resume restores the same phase, choose one")
+        ckpt = torch.load(config.init_from,map_location="cpu",weights_only=False)
+        previous = ckpt.get("training_contract",{})
+        old_async = previous.get("asynchronous",{})
+        new_async = contract.get("asynchronous",{})
+        excluded = {"phase","pseudo_sha256","pseudo_weight","pseudo_ramp_epochs"}
+        if (old_async.get("phase") != 1 or new_async.get("phase") != 2 or
+            {k:v for k,v in old_async.items() if k not in excluded} !=
+            {k:v for k,v in new_async.items() if k not in excluded}):
+            raise ValueError("Phase-2 initialization requires matching phase-1 representation/data/RGB protocol")
+        raw_model.load_state_dict(ckpt["state_dict"],strict=True)
+        stage_parent = dict(checkpoint=str(Path(config.init_from).resolve()),step=ckpt["step"],
+                            training_contract=previous,optimizer="fresh",streams="reset")
+        del ckpt
+    elif asynchronous and contract["asynchronous"]["phase"] == 2 and not config.resume:
+        raise ValueError("Phase 2 requires --init-from phase-1 checkpoint or --resume phase-2 checkpoint")
     if config.resume:
         ckpt = torch.load(config.resume, map_location="cpu", weights_only=False)
         previous = dict(ckpt.get("training_contract", {}))
@@ -399,11 +434,17 @@ def _run(config, args, runtime):
                                                 if temporal else {}))
                     loss = result["loss"]
                 if temporal:
-                    streams.commit(unpacked[2], result["temporal_state"])
+                    if asynchronous:
+                        pending_state = result["temporal_state"]
+                    else:
+                        streams.commit(unpacked[2], result["temporal_state"])
                     # The external bank owns detached state; do not retain the
                     # output-state autograd graph across optimizer updates.
                     del result["temporal_state"]
                 if result.get("skip_step", False):
+                    if asynchronous:
+                        streams.commit(unpacked[2], pending_state)
+                        del pending_state
                     continue
                 if not runtime.all_true(bool(torch.isfinite(loss))):
                     raise FloatingPointError(f"Non-finite {precision} loss at update {step}")
@@ -426,6 +467,9 @@ def _run(config, args, runtime):
                 raise FloatingPointError(f"Non-finite {precision} gradient")
             scaler.step(optimizer)
             scaler.update()
+            if asynchronous:
+                streams.commit(unpacked[2], pending_state)
+                del pending_state
             step += 1
             torch.cuda.synchronize()
             seconds = runtime.reduce([time.perf_counter()-started], dist.ReduceOp.MAX)[0]
@@ -529,7 +573,11 @@ def run_seg_evaluation(config, args):
         if saved_mode is not None and saved_mode != model.backbone.fusion_mode:
             raise ValueError("Evaluation fusion mode differs from checkpoint contract")
         model.load_state_dict(state.get("state_dict", state), strict=True)
-    dataset = DSECFrames(args.data_root, args.data_list)
+    if hasattr(config,"bins"):
+        from hmnet.dataset.dsec_async import DSECAsync
+        dataset = DSECAsync(args.data_root,args.data_list,window_us=config.window_us,bins=config.bins)
+    else:
+        dataset = DSECFrames(args.data_root, args.data_list)
     with torch.amp.autocast(device.type, enabled=args.fp16):
         metrics = evaluate_seg(
             model,

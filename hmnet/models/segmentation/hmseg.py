@@ -76,6 +76,9 @@ class HMSeg(BlockBase):
         self.aux_head = self.aux_head.to(d0)
 
     def forward(self, list_events, list_images, list_image_metas, list_gt, init_states=True, temporal_state=None) -> Tensor:
+        if is_frame_model(self) and torch.is_tensor(list_events) and list_events.ndim == 5:
+            from ..async_frame import clip_loss
+            return clip_loss(self, list_events, list_images, list_image_metas, list_gt, temporal_state)
         if is_frame_model(self):
             return frame_loss(self, list_events, list_images, list_image_metas, list_gt, 'segmentation', temporal_state=temporal_state)
         if init_states:

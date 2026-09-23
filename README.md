@@ -2,17 +2,15 @@
 
 This repo is a PyTorch implementation of HMNet proposed in our paper: [Hierarchical Neural Network for Low Latency Event Processing](https://hamarh.github.io/hmnet/).
 
-## 当前工程入口与实验阶段
+## 当前工程：异步RGB–DVS分割 v1.2_T_2（方案C）
 
-本仓库保留原 HMNet，并增加无状态官方 EfficientViT-B1 基线。**下方原论文 HMNet-B1/B3 的结果不是新 EfficientViT-B1 的实测结果**，名称中的 B1 也不表示相同模型。
+分支 `seg_rgbdvs_640x440_v1.2_T_2`，父提交v1.2_T/76f1a8c。25ms/5bin/10通道事件窗口，约25ms推进并输出；低频RGB按需编码并缓存。保留SimpleAdd、DVS LiteMLA M=2。配对实验v1.2_T_1采用50ms/10bin/20通道，其余共同源码一致。
 
-- [分割：DSEC，数据准备 / train / test](experiments/segmentation/README.md)：当前先验证 RGB、DVS、RGB+DVS，保留共享离线缓存。
-- [检测：GEN1，数据准备 / train / test](experiments/detection/README.md)：已接入 B1 并做真实样本冒烟，正式全量实验待开展。
-- [深度：Eventscape / MVSEC，数据准备 / train / test](experiments/depth/README.md)：已接入 B1 并做真实样本冒烟，正式全量实验待开展。
+**当前运行入口：[各阶段完整服务器命令](experiments/segmentation/ASYNC_RGB_DVS.md)**：数据准备、阶段一150轮、共享伪标签审核/生成、阶段二额外微调、恢复、流式评估及ONNX导出。[官方算法源码参考](experiments/segmentation/ASYNC_REFERENCES.md)。
 
-三任务复用骨干结构、独立实例化训练。当前工程为 **HWAware_HMNet_Seg_RGBDVS_640x440_v1.2**，分支 `seg_rgbdvs_640x440_v1.2`，默认融合 `add`，BF16、150 epoch。结构说明、验证范围与训练/恢复命令见[融合实验说明](experiments/segmentation/TRAINING_PRECISION.md)。保留原HMNet、检测/深度入口；当前模型尚未加入HWAware、S-FIFO或自回归。
+训练使用两步片段反传和GT时刻的旧RGB监督；中间时刻伪标签须在阶段一权重有效且质量审核通过后启用。正式训练由用户手动启动。训练产物在logs，诊断/ONNX在artifacts，共享新数据在数据集preprocessed。
 
-训练产物放本工程 `logs/`；Agent诊断与ONNX放 `artifacts/`；数据预处理放共享数据集 `preprocessed/`。新工程未复制父工程历史日志或训练权重。
+保留原HMNet及检测/深度入口。本次异步实现针对DSEC语义分割；下方论文HMNet-B1/B3结果不代表本实验EfficientViT-B1的精度，旧同步命令不适用于本版本的正式异步实验。
 
 ## Results and models
 
