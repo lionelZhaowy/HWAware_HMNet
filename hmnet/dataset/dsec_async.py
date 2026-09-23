@@ -31,7 +31,10 @@ class DSECAsync(Dataset):
         self.epoch,self.seed = 0,42
         self.delay_probability,self.rgb_delay_frames = delay_probability,rgb_delay_frames
         self.rgb_keep_every = rgb_keep_every
-        if rgb_delay_frames < 0 or rgb_keep_every not in (1,2):raise ValueError("Invalid RGB schedule")
+        if rgb_delay_frames not in (0,1) or rgb_keep_every not in (1,2):
+            raise ValueError("Prepared cache supports zero/one-frame RGB delay and keep-every 1/2")
+        if rgb_delay_frames and rgb_keep_every != 1:
+            raise ValueError("Run RGB delay and RGB thinning as separate diagnostics")
         self.pseudo_root = Path(pseudo_root) if pseudo_root else None
         self.pseudo_weight,self.pseudo_ramp_epochs = pseudo_weight,pseudo_ramp_epochs
         self.pseudo_signature = None
