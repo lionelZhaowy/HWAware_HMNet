@@ -7,10 +7,12 @@ from hmnet.models.efficientvit_tasks import build_frame_task
 from hmnet.dataset.dsec_frames import DSECFrames
 from hmnet.dataset.temporal_frames import SequenceBatchSampler
 from hmnet.utils.temporal_streams import TemporalStreams
+from hmnet.models.base.event_repr.polarity import input_spec, validate_input_spec
 
 
-def build(mode):
-    return build_frame_task('segmentation',modality='rgbdvs',fusion_mode=mode,temporal_window=2)
+def build(mode, representation):
+    return build_frame_task('segmentation',modality='rgbdvs',fusion_mode=mode,temporal_window=2,
+                            event_channels=input_spec(representation)["channels"])
 
 
 def step(model,opt,bank,batch):
@@ -42,12 +44,15 @@ def compare(a,b):
 def main(args):
     torch.set_num_threads(1);torch.use_deterministic_algorithms(True);torch.manual_seed(42)
     ckpt=torch.load(args.checkpoint,map_location='cpu',weights_only=False)
-    contract=ckpt['training_contract'];data=DSECFrames(contract['data_root'],'train',augment=True)
+    contract=ckpt['training_contract']
+    representation=contract.get('event_input',{}).get('representation','rvt_histogram')
+    validate_input_spec(contract.get('event_input'),representation)
+    data=DSECFrames(contract['data_root'],'train',augment=True,representation=representation)
     sampler=SequenceBatchSampler(data,contract['batch_size'],seed=contract['seed'])
     sampler.set_epoch(ckpt['data_epoch']);keys=list(sampler)
     cursor=ckpt['data_cursor'];assert cursor<len(keys)
     batch=[data[k] for k in keys[cursor][:2]]
-    model=build(contract['fusion_mode']);model.load_state_dict(ckpt['state_dict'],strict=True)
+    model=build(contract['fusion_mode'], representation);model.load_state_dict(ckpt['state_dict'],strict=True)
     opt=torch.optim.AdamW(model.parameters());opt.load_state_dict(ckpt['optimizer'])
     bank=TemporalStreams(model.backbone,contract['batch_size']);bank.load_state_dict(ckpt['temporal_by_rank'][0])
     # Serialize the running weights/optimizer/BN and bank before the next step.
@@ -55,7 +60,7 @@ def main(args):
                                     bank=bank.state_dict(),rng=torch.get_rng_state()),buf)
     expected_loss=step(model,opt,bank,batch)
     buf.seek(0);saved=torch.load(buf,map_location='cpu',weights_only=False)
-    restored=build(contract['fusion_mode']);restored.load_state_dict(saved['model'],strict=True)
+    restored=build(contract['fusion_mode'], representation);restored.load_state_dict(saved['model'],strict=True)
     resumed_opt=torch.optim.AdamW(restored.parameters());resumed_opt.load_state_dict(saved['optimizer'])
     resumed_bank=TemporalStreams(restored.backbone,contract['batch_size']);resumed_bank.load_state_dict(saved['bank'])
     torch.set_rng_state(saved['rng'])

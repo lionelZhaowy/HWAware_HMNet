@@ -16,6 +16,8 @@ import onnxruntime as ort
 from onnxsim import simplify
 import torch
 from hmnet.dataset.dsec_frames import DSECFrames
+from hmnet.models.base.event_repr.polarity import input_spec, validate_input_spec
+from hmnet.utils.config import load_config
 from hmnet.models.efficientvit_tasks import build_frame_task
 from scripts.export_b1_onnx import FrameGraph
 
@@ -55,10 +57,16 @@ def export(args):
     if temporal.get('window')!=2 or temporal.get('branch')!='dvs':
         raise ValueError('A matching M=2 DVS temporal training checkpoint is required')
     mode=contract['fusion_mode']
-    model=build_frame_task('segmentation',modality='rgbdvs',fusion_mode=mode,temporal_window=2).eval()
+    config=load_config(args.config, "polarity_export").TrainSettings()
+    representation=getattr(config, 'event_representation', 'rvt_histogram')
+    validate_input_spec(contract.get('event_input'), representation)
+    if config.fusion_mode != mode or config.temporal_window != 2:
+        raise ValueError('Export config fusion/temporal architecture differs from checkpoint')
+    model=build_frame_task('segmentation',modality='rgbdvs',fusion_mode=mode,temporal_window=2,
+                           event_channels=input_spec(representation)['channels']).eval()
     model.load_state_dict(ckpt['state_dict'],strict=True)
     wrapper=TemporalGraph(model,args.backbone_only).eval()
-    data=DSECFrames(args.data_root,'dev',limit=3)
+    data=DSECFrames(args.data_root or config.cache,'dev',limit=3,representation=representation)
     frames=[]
     for i in range(len(data)):
         inputs,_,_=data[i];frames.append((inputs['events'][None],inputs['images'][None]))
@@ -103,7 +111,7 @@ def export(args):
             ort_states=[v[-7:] for v in values]
     failures=[f"{c['case']}/{c['graph']}/{c['output']}" for c in checks if not c['passed']]
     report=dict(passed=not failures,failures=failures,checks=checks,fusion_mode=mode,
-        temporal=temporal,checkpoint=str(Path(args.checkpoint).resolve()),step=ckpt.get('step'),
+        temporal=temporal,event_input=data.input_spec,event_data=data.data_contract,checkpoint=str(Path(args.checkpoint).resolve()),step=ckpt.get('step'),
         checkpoint_sha256=hashlib.sha256(Path(args.checkpoint).read_bytes()).hexdigest(),
         inference_precision='FP32',training_precision=contract['precision'],
         samples=[s['file'] for s in data.samples],state_feedback='independent trajectories for each backend',
@@ -113,7 +121,8 @@ def export(args):
             ['hmnet/models/base/backbone/temporal_litemla.py',
              'hmnet/models/base/backbone/efficientvit_b1.py',
              'hmnet/models/base/backbone/cross_modal_litemla.py',
-             'hmnet/models/efficientvit_tasks.py','scripts/export_temporal_onnx.py']},
+             'hmnet/models/efficientvit_tasks.py','scripts/export_temporal_onnx.py',
+             'hmnet/models/base/event_repr/polarity.py','hmnet/dataset/dsec_frames.py']},
         inputs={n:list(t.shape) for n,t in zip(input_names,(*frames[0],*memory))},
         outputs={n:list(t.shape) for n,t in zip(output_names,expected)},
         nodes={label:dict(Counter(n.op_type for n in graph.graph.node)) for label,graph in
@@ -126,6 +135,7 @@ if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--checkpoint',required=True)
     p.add_argument('--output',required=True)
-    p.add_argument('--data-root',default='/home/zhaowenyao24/Conda_prj/lab_dataset/DSEC_Semantic/preprocessed/dsec_b1')
+    p.add_argument('--data-root',default=None)
+    p.add_argument('--config',default='experiments/segmentation/config/efficientvit_b1.py')
     p.add_argument('--backbone-only',action='store_true')
     export(p.parse_args())

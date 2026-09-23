@@ -11,6 +11,8 @@ class TrainSettings:
     fusion_mode = "add"
     precision = "bf16"
     temporal_window = 2
+    event_representation = "polarity_count"
+    event_channels = 2
     # Normal training uses epochs; explicit updates take priority.
     epochs = 150
     updates = None
@@ -28,9 +30,9 @@ class TrainSettings:
     workers = 8
     # One prefetched batch per worker limits memory across three experiments.
     prefetch_factor = 1
-    output = str(ROOT / "logs/segmentation/efficientvit_b1_add_v12_T_bf16")
+    output = str(ROOT / "logs/segmentation/efficientvit_b1_add_v12_T_dot2_count_bf16")
     cache = (
-        "/home/zhaowenyao24/Conda_prj/lab_dataset/DSEC_Semantic/preprocessed/dsec_b1"
+        "/home/zhaowenyao24/Conda_prj/lab_dataset/DSEC_Semantic/preprocessed/dsec_b1_polarity50ms"
     )
     resume = ""
     overfit = 0
@@ -42,15 +44,17 @@ class TrainSettings:
             modality=self.modality,
             fusion_mode=self.fusion_mode,
             temporal_window=self.temporal_window,
+            event_channels=self.event_channels,
         )
 
     def get_dataset(self):
         return DSECFrames(
-            self.cache, "train", augment=not self.overfit, limit=self.overfit or None
+            self.cache, "train", augment=not self.overfit, limit=self.overfit or None,
+            representation=self.event_representation
         )
 
     def get_validation_dataset(self):
-        return DSECFrames(self.cache, "dev")
+        return DSECFrames(self.cache, "dev", representation=self.event_representation)
 
 
 class TestSettings(TrainSettings):

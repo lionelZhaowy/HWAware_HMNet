@@ -4,13 +4,15 @@ This repo is a PyTorch implementation of HMNet proposed in our paper: [Hierarchi
 
 ## 当前工程入口与实验阶段
 
-本仓库保留原 HMNet，并增加无状态官方 EfficientViT-B1 基线。**下方原论文 HMNet-B1/B3 的结果不是新 EfficientViT-B1 的实测结果**，名称中的 B1 也不表示相同模型。
+本仓库保留原 HMNet，并增加官方 EfficientViT-B1 融合及时序实验。**下方原论文 HMNet-B1/B3 的结果不是新 EfficientViT-B1 的实测结果**，名称中的 B1 也不表示相同模型。
 
 - [分割：DSEC，数据准备 / train / test](experiments/segmentation/README.md)：当前先验证 RGB、DVS、RGB+DVS，保留共享离线缓存。
 - [检测：GEN1，数据准备 / train / test](experiments/detection/README.md)：已接入 B1 并做真实样本冒烟，正式全量实验待开展。
 - [深度：Eventscape / MVSEC，数据准备 / train / test](experiments/depth/README.md)：已接入 B1 并做真实样本冒烟，正式全量实验待开展。
 
-三任务复用骨干结构、独立实例化训练。当前工程为 **HWAware_HMNet_Seg_RGBDVS_640x440_v1.2**，分支 `seg_rgbdvs_640x440_v1.2`，默认融合 `add`，BF16、150 epoch。结构说明、验证范围与训练/恢复命令见[融合实验说明](experiments/segmentation/TRAINING_PRECISION.md)。保留原HMNet、检测/深度入口；当前模型尚未加入HWAware、S-FIFO或自回归。
+三任务复用骨干结构、独立实例化训练。当前工程为 **v1.2_T.2：50ms双极性计数输入**，分支 `seg_rgbdvs_640x440_v1.2_T.2`，直接派生自同步v1.2_T/76f1a8c。DVS输入为2通道非负原始计数图，RGB同步编码；保持Add、DVS LiteMLA M=2、TBPTT=1及150epoch/BF16训练。只有必要DVS首层输入通道从20改为2，非首层初始化与父版一致。与异步下划线版本v1.2_T_2不同。
+
+完整定义、共享缓存、训练/恢复/评估/ONNX命令见[双极性输入实验](experiments/segmentation/POLARITY_INPUTS.md)。正式训练由用户启动，短步冒烟不代表精度结果；ONNX结构检查与严格数值验收分别记录在本地artifacts。保留原HMNet及检测/深度入口，硬件无除法未移植。
 
 训练产物放本工程 `logs/`；Agent诊断与ONNX放 `artifacts/`；数据预处理放共享数据集 `preprocessed/`。新工程未复制父工程历史日志或训练权重。
 

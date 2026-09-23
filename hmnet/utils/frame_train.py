@@ -19,6 +19,7 @@ from hmnet.dataset.custom_collate_fn import collate_keep_dict
 from hmnet.utils.common import fix_seed
 from hmnet.dataset.temporal_frames import SequenceBatchSampler, manifest_signature
 from hmnet.utils.temporal_streams import TemporalStreams
+from hmnet.models.base.event_repr.polarity import input_spec, validate_input_spec
 
 
 def unpack(batch, task):
@@ -260,6 +261,16 @@ def _run(config, args, runtime):
         seed=args.seed,
         data_root=str(getattr(config, "cache", getattr(config, "data_root", ""))),
     )
+    representation = getattr(config, "event_representation", "rvt_histogram")
+    if representation != "rvt_histogram":
+        validate_input_spec(getattr(dataset, "input_spec", None), representation)
+        if getattr(config, "event_channels", None) != dataset.input_spec["channels"]:
+            raise ValueError("Config event channels differ from dataset representation")
+        if (dataset.data_contract["diagnostic_subset"] and not getattr(args, "stop_after", None)
+                and not getattr(config, "overfit", 0)):
+            raise ValueError("Diagnostic subset cache cannot start a full training run")
+        contract["event_input"] = input_spec(representation)
+        contract["event_data"] = dataset.data_contract
     if temporal:
         contract["temporal"] = dict(window=2, branch="dvs", state_dtype="float32",
             reduction_dtype="float32", tbptt=1, sampler="balanced_sequence_lanes_v1",
@@ -297,7 +308,7 @@ def _run(config, args, runtime):
         expected = {k: v for k, v in contract.items() if not new_stage or k != "schedule"}
         actual = {k: v for k, v in previous.items() if not new_stage or k != "schedule"}
         if actual != expected:
-            raise ValueError("Resume training contract differs (precision/world size/BN/data/batch/seed/LR); start a separate experiment")
+            raise ValueError("Resume training contract differs (event representation/precision/world size/BN/data/batch/seed/LR); start a separate experiment")
         if new_stage:
             if output.resolve() == Path(config.resume).resolve().parent or has_run:
                 raise ValueError("A new stage requires a separate, empty output directory")
@@ -324,6 +335,8 @@ def _run(config, args, runtime):
     if step >= max_updates:
         raise ValueError(f"Checkpoint already has {step} updates; target is {max_updates}")
     validation = config.get_validation_dataset() if hasattr(config, "get_validation_dataset") else None
+    if representation != "rvt_histogram" and validation is not None:
+        validate_input_spec(getattr(validation, "input_spec", None), representation)
     history = output / "metrics.jsonl"
     if runtime.primary:
         if config.resume and history.exists():
@@ -522,6 +535,8 @@ def run_seg_evaluation(config, args):
     if not args.random_init:
         state = torch.load(checkpoint, map_location="cpu", weights_only=False)
         saved_contract = state.get("training_contract", {})
+        validate_input_spec(saved_contract.get("event_input"),
+                            getattr(config, "event_representation", "rvt_histogram"))
         saved_window = saved_contract.get("temporal", {}).get("window", 0)
         if saved_window != getattr(model.backbone, "temporal_window", 0):
             raise ValueError("Evaluation temporal architecture differs from checkpoint")
@@ -529,7 +544,8 @@ def run_seg_evaluation(config, args):
         if saved_mode is not None and saved_mode != model.backbone.fusion_mode:
             raise ValueError("Evaluation fusion mode differs from checkpoint contract")
         model.load_state_dict(state.get("state_dict", state), strict=True)
-    dataset = DSECFrames(args.data_root, args.data_list)
+    dataset = DSECFrames(args.data_root, args.data_list,
+                         representation=getattr(config, "event_representation", "rvt_histogram"))
     with torch.amp.autocast(device.type, enabled=args.fp16):
         metrics = evaluate_seg(
             model,
@@ -538,6 +554,8 @@ def run_seg_evaluation(config, args):
             workers=getattr(config, "workers", 0),
             prefetch_factor=getattr(config, "prefetch_factor", 1),
         )
+    metrics["event_input"] = dataset.input_spec
+    metrics["event_data"] = dataset.data_contract
     out = Path(config.output)
     out.mkdir(parents=True, exist_ok=True)
     (out / f"evaluation_{args.data_list}.json").write_text(
