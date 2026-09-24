@@ -66,7 +66,7 @@ class SequenceBatchSampler:
                         continue
                     i=indices[t]; sample=self.dataset.samples[i]; old=previous[slot]
                     reset=(old is None or old[0] != sample["sequence"] or
-                           not 0 < sample["target_us"]-old[1] <= 75000)
+                           not 0 < sample["target_us"]-old[1] <= getattr(self.dataset, "reset_gap_us", 75000))
                     batch.append((i, slot, reset, bool(flips[slot]) and self.dataset.augment))
                     previous[slot]=(sample["sequence"], sample["target_us"])
                 if batch:
@@ -83,7 +83,7 @@ class SequenceBatchSampler:
                     if indices is None: continue
                     pos=positions[slot];i=indices[pos]
                     reset=pos==0 or not 0 < (self.dataset.samples[i]["target_us"]-
-                              self.dataset.samples[indices[pos-1]]["target_us"]) <= 75000
+                              self.dataset.samples[indices[pos-1]]["target_us"]) <= getattr(self.dataset, "reset_gap_us", 75000)
                     batch.append((i,slot,reset,False))
                     positions[slot]+=1
                     if positions[slot]==len(indices):

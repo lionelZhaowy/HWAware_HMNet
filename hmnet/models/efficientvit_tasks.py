@@ -11,7 +11,7 @@ from hmnet.models.depth import HMDepth
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def build_frame_task(task, pretrained=None, mvsec=False, modality=None, fusion_mode="add", temporal_window=0):
+def build_frame_task(task, pretrained=None, mvsec=False, modality=None, fusion_mode="add", temporal_window=0, event_channels=20):
     if task not in ("segmentation", "detection", "depth"):
         raise ValueError(task)
     name = "hmnet_B3_yolox.py" if task == "detection" else "hmnet_B3.py"
@@ -43,4 +43,30 @@ def build_frame_task(task, pretrained=None, mvsec=False, modality=None, fusion_m
         positional.append(copy.deepcopy(base.aux_head))
     model = cls(*positional, devices=[torch.device("cuda:0")])
     model.init_weights()
+    if event_channels != 20:
+        if event_channels != 2 or not model.backbone.use_events:
+            raise ValueError("Input ablations support two polarity channels")
+        # Construct the full canonical model first: changing Conv2d size earlier
+        # shifts RNG consumption and changes otherwise unrelated neck/head weights.
+        block = model.backbone.event_encoder.input_stem.op_list[0]
+        old = block.conv
+        with torch.random.fork_rng(devices=[]):
+            replacement = torch.nn.Conv2d(2, old.out_channels, old.kernel_size,
+                old.stride, old.padding, old.dilation, old.groups,
+                old.bias is not None, old.padding_mode)
+        with torch.no_grad():
+            if pretrained is not None:
+                checkpoint = torch.load(pretrained, map_location="cpu", weights_only=True)
+                weights = checkpoint.get("state_dict", checkpoint)
+                weights = {k.removeprefix("module."):v for k,v in weights.items()}
+                source = weights["backbone.input_stem.op_list.0.conv.weight"]
+                replacement.weight.copy_(source.mean(1, keepdim=True).repeat(1,2,1,1) * (3/2))
+            else:
+                # Defined deterministic diagnostic initialization with preserved
+                # channel-summed response; no effect on the external RNG stream.
+                replacement.weight.copy_(old.weight.sum(1, keepdim=True).repeat(1,2,1,1) / 2)
+            if old.bias is not None:
+                replacement.bias.copy_(old.bias)
+        block.conv = replacement
+        model.backbone.event_channels = 2
     return model
