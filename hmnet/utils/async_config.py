@@ -34,6 +34,7 @@ class AsyncSettings:
     resume = ""
     init_from = None
     pseudo_root = None
+    allow_failed_pseudo_audit = False
     pseudo_weight = .2
     pseudo_ramp_epochs = 5
     overfit = 0
@@ -44,6 +45,7 @@ class AsyncSettings:
                                 fusion_mode="add",temporal_window=2,event_channels=self.bins*2)
     def get_dataset(self):
         return DSECAsync(self.cache,"train",clips=True,augment=True,window_us=self.window_us,bins=self.bins,
-            pseudo_root=self.pseudo_root,pseudo_weight=self.pseudo_weight,pseudo_ramp_epochs=self.pseudo_ramp_epochs,diagnostic_pseudo=getattr(self,"diagnostic_pseudo",False))
+            pseudo_root=self.pseudo_root,pseudo_weight=self.pseudo_weight,pseudo_ramp_epochs=self.pseudo_ramp_epochs,diagnostic_pseudo=getattr(self,"diagnostic_pseudo",False),
+            allow_failed_pseudo_audit=self.allow_failed_pseudo_audit)
     def get_validation_dataset(self):
         return DSECAsync(self.cache,"dev",window_us=self.window_us,bins=self.bins,limit=self.validation_limit)

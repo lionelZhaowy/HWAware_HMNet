@@ -6,13 +6,14 @@ import cv2
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+from hmnet.utils.pseudo_audit import validate_pseudo_audit
 
 
 class DSECAsync(Dataset):
     async_data = True
     def __init__(self, root, split="train", augment=False, clips=False,
                  window_us=50000, bins=10, pseudo_root=None, pseudo_weight=0.2,
-                 pseudo_ramp_epochs=5, delay_probability=0.5, rgb_delay_frames=0, rgb_keep_every=1, limit=None, diagnostic_pseudo=False):
+                 pseudo_ramp_epochs=5, delay_probability=0.5, rgb_delay_frames=0, rgb_keep_every=1, limit=None, diagnostic_pseudo=False, allow_failed_pseudo_audit=False):
         self.root = Path(root)
         path = self.root/"manifest.json"
         self.manifest = json.loads(path.read_text())
@@ -45,8 +46,7 @@ class DSECAsync(Dataset):
             pseudo = json.loads(manifest_path.read_text())
             if pseudo.get("diagnostic_only") and not diagnostic_pseudo:
                 raise ValueError("Synthetic diagnostic pseudo labels cannot enter formal training")
-            if pseudo.get("format") != "dsec_async_pseudo_v1" or not pseudo.get("audit_passed"):
-                raise ValueError("Pseudo labels require a passing independent audit")
+            validate_pseudo_audit(pseudo,self.pseudo_root,allow_failed=allow_failed_pseudo_audit)
             if self.manifest["grid_sha256"] != pseudo["grid_sha256"]:
                 raise ValueError("Pseudo time grid differs")
             if pseudo.get("split") != "train":raise ValueError("Pseudo labels must be train-only")

@@ -17,6 +17,8 @@ def parse_settings(argv=None):
                           help="Restore CHECKPOINT, or output/checkpoint.pth when no path is supplied")
     recovery.add_argument("--init-from")
     p.add_argument("--pseudo-root")
+    p.add_argument("--allow-failed-pseudo-audit",action="store_true",
+                   help="Consume explicitly documented exploratory pseudo labels; required again on resume")
     p.add_argument("--epochs",type=int)
     p.add_argument("--pseudo-weight",type=float,default=.2)
     p.add_argument("--workers",type=int,default=8)
@@ -35,7 +37,9 @@ def parse_settings(argv=None):
     if args.epochs is not None and args.epochs <= 0:p.error("epochs must be positive")
     if args.workers < 0:p.error("workers must be nonnegative")
     if not 0 <= args.pseudo_weight <= 1:p.error("pseudo-weight must be in [0,1]")
+    if args.allow_failed_pseudo_audit and args.stage!=2:p.error("--allow-failed-pseudo-audit is stage-2 only")
     config=AsyncSettings()
+    config.allow_failed_pseudo_audit=args.allow_failed_pseudo_audit
     config.workers=args.workers;config.resume=args.resume;config.init_from=args.init_from
     config.deterministic=args.deterministic;config.validation_limit=args.validation_limit
     if args.data_root:config.cache=args.data_root
