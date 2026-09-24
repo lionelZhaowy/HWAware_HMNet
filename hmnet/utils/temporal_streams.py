@@ -3,7 +3,8 @@ import torch
 
 
 class TemporalStreams:
-    def __init__(self, backbone, capacity):
+    def __init__(self, backbone, capacity, reset_gap_us=75000):
+        self.reset_gap_us = reset_gap_us
         self.memory = backbone.zero_temporal_state(capacity)
         self.last = [None]*capacity
 
@@ -16,7 +17,7 @@ class TemporalStreams:
             old=self.last[i]
             reset.append(bool(m["reset"]) or old is None or old[0]!=m["sequence"]
                          or old[2]!=bool(m["flipped"])
-                         or not 0 < int(m["curr_time_org"])-old[1] <= 75000)
+                         or not 0 < int(m["curr_time_org"])-old[1] <= self.reset_gap_us)
         indices=torch.tensor(ids,device=self.memory[0].device)
         mask=torch.tensor(reset,device=indices.device).reshape(-1,1,1,1)
         return tuple(s.index_select(0,indices).masked_fill(mask,0.) for s in self.memory)

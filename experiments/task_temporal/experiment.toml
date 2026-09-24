@@ -1,0 +1,2 @@
+dataset = "eventscape"
+representation = "polarity_binary"
