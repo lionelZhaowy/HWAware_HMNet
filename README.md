@@ -1,3 +1,5 @@
+> 本分支同步v1.2_T检测/深度实验请先读[新任务入口](experiments/task_temporal/README.md)；下文保留的旧frame/HMNet命令不代表新M=2实验。
+
 # Hierarchical Neural Memory Network
 
 This repo is a PyTorch implementation of HMNet proposed in our paper: [Hierarchical Neural Network for Low Latency Event Processing](https://hamarh.github.io/hmnet/).

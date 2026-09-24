@@ -1,3 +1,5 @@
+> 本分支同步v1.2_T检测/深度实验请先读[新任务入口](../task_temporal/README.md)；下文保留的旧frame/HMNet命令不代表新M=2实验。
+
 # EfficientViT-B1 使用说明
 
 配置 [efficientvit_b1.py](config/efficientvit_b1.py)：50ms RVT Histogram → DVS单分支官方B1 → 四尺度Pyramid → 原深度头。Eventscape和MVSEC独立实例化及训练。以下均从仓库根目录运行。

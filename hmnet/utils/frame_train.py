@@ -196,6 +196,10 @@ def learning_rate_at(update, schedule):
 
 
 def run(config, args):
+    if getattr(config, "deterministic", False):
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
     runtime = DistributedRun(args)
     try:
         return _run(config, args, runtime)
@@ -228,8 +232,8 @@ def _run(config, args, runtime):
     dataset = config.get_dataset()
     generator = torch.Generator()
     temporal = bool(getattr(config, "temporal_window", 0))
-    if temporal and (config.task != "segmentation" or config.accumulation != 1):
-        raise ValueError("Temporal first experiment requires segmentation and accumulation=1")
+    if temporal and config.accumulation != 1:
+        raise ValueError("Temporal first experiment requires accumulation=1")
     sampler = (SequenceBatchSampler(dataset, config.batch_size, runtime.rank,
                                    runtime.world_size, training=True, seed=args.seed)
                if temporal else GlobalBatchSampler(
@@ -260,10 +264,15 @@ def _run(config, args, runtime):
         seed=args.seed,
         data_root=str(getattr(config, "cache", getattr(config, "data_root", ""))),
     )
+    if hasattr(dataset, "data_contract"):
+        if dataset.data_contract["diagnostic_subset"] and not getattr(args, "stop_after", None):
+            raise ValueError("Diagnostic subset requires stop-after")
+        contract.update(task=config.task, deterministic=getattr(config, "deterministic", False), event_input=dataset.input_spec, event_data=dataset.data_contract,
+                        initialization=getattr(config, "initialization_contract", None))
     if temporal:
         contract["temporal"] = dict(window=2, branch="dvs", state_dtype="float32",
             reduction_dtype="float32", tbptt=1, sampler="balanced_sequence_lanes_v1",
-            reset_gap_us=75000, manifest_sha256=manifest_signature(dataset))
+            reset_gap_us=getattr(dataset, "reset_gap_us", 75000), manifest_sha256=manifest_signature(dataset))
     if runtime.primary:
         print(json.dumps(dict(training_contract=contract, batches_per_epoch=len(loader),
                               resolved_updates=max_updates, local_batch=config.batch_size // runtime.world_size)), flush=True)
@@ -277,7 +286,7 @@ def _run(config, args, runtime):
                                         broadcast_buffers=False)
     else:
         model = raw_model
-    streams = TemporalStreams(raw_model.backbone, config.batch_size) if temporal else None
+    streams = TemporalStreams(raw_model.backbone, config.batch_size, getattr(dataset, "reset_gap_us", 75000)) if temporal else None
     # Distinct dropout streams, reproducible via per-rank checkpoint RNG.
     fix_seed(args.seed + runtime.rank)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate,
@@ -395,11 +404,12 @@ def _run(config, args, runtime):
                     weight = runtime.world_size * pixels / total_pixels
                 with torch.amp.autocast("cuda", enabled=amp, dtype=amp_dtype):
                     unpacked = unpack(batch, config.task)
-                    result = model(*unpacked, **(dict(temporal_state=streams.select(unpacked[2]))
+                    stream_metas = unpacked[1] if config.task == "detection" else unpacked[2]
+                    result = model(*unpacked, **(dict(temporal_state=streams.select(stream_metas))
                                                 if temporal else {}))
                     loss = result["loss"]
                 if temporal:
-                    streams.commit(unpacked[2], result["temporal_state"])
+                    streams.commit(stream_metas, result["temporal_state"])
                     # The external bank owns detached state; do not retain the
                     # output-state autograd graph across optimizer updates.
                     del result["temporal_state"]
