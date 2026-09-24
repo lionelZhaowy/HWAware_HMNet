@@ -7,10 +7,12 @@ No boxes, track interpolation, future frames or temporal pixel copying.
 """
 import argparse
 import json
+import shutil
 from pathlib import Path
 import numpy as np
 import torch
 from hmnet.dataset.dsec_async import DSECAsync
+from hmnet.utils.pseudo_audit import validate_audit,audit_failures
 from hmnet.models.async_frame import AsyncPredictor
 from hmnet.utils.async_checkpoint import load_async_model,file_sha256
 from hmnet.utils.binary_teacher import load_binary_teacher,BinaryTeacherInputs,BinaryTeacherPredictor
@@ -32,13 +34,6 @@ def agreement_mask(logits_b, logits_c, confidence):
 
 
 
-def validate_audit(audit, provenance, protocol, confidence, grid_sha256):
-    if (not audit["passed"] or audit["teachers"] != provenance
-            or audit["confidence"] != confidence or audit.get("teacher_protocol") != protocol
-            or audit["grid_sha256"] != grid_sha256):
-        raise ValueError("Failed/stale audit or teacher/confidence/protocol/grid mismatch; rerun audit")
-
-
 def boundary_mask(label):
     valid=label!=255;edge=torch.zeros_like(valid)
     horizontal=(label[:,1:]!=label[:,:-1])&valid[:,1:]&valid[:,:-1]
@@ -46,6 +41,17 @@ def boundary_mask(label):
     edge[:,1:] |= horizontal;edge[:,:-1] |= horizontal
     edge[1:] |= vertical;edge[:-1] |= vertical
     return edge
+
+
+class TeacherSamples(torch.utils.data.Dataset):
+    """CPU prefetch only; preserve chronological order and predictor states."""
+    def __init__(self, datasets): self.datasets=datasets
+    def __len__(self): return len(self.datasets[0])
+    def __getitem__(self,index): return [ds[index] for ds in self.datasets]
+
+
+def identity_sample(sample):
+    return sample
 
 
 def main(args):
@@ -82,13 +88,19 @@ def main(args):
     if args.mode=="generate":
         if not args.audit:raise ValueError("Generation requires --audit from held-out dev labels")
         audit=json.loads(Path(args.audit).read_text())
-        validate_audit(audit,provenance,protocol,args.confidence,data[0].manifest["grid_sha256"])
+        validate_audit(audit,provenance,protocol,args.confidence,data[0].manifest["grid_sha256"],
+                       allow_failed=args.allow_failed_audit,reason=args.exploration_reason)
+        print(json.dumps(dict(audit_passed=audit["passed"],exploratory=not audit["passed"],
+                              failed_checks=audit_failures(audit))),flush=True)
     total=np.zeros(11,dtype=np.int64);accepted=np.zeros(11,dtype=np.int64);correct=np.zeros(11,dtype=np.int64)
     boundary_total=boundary_accepted=boundary_correct=0
     files={};pseudo_pixels=0;all_pixels=0
+    loader_options=dict(num_workers=args.workers,batch_size=None,collate_fn=identity_sample)
+    if args.workers:loader_options.update(prefetch_factor=1,multiprocessing_context="spawn")
+    loader=torch.utils.data.DataLoader(TeacherSamples(data),**loader_options)
     with torch.inference_mode():
-        for i in range(len(data[0])):
-            samples=[ds[i] for ds in data];metas=[x[2]["image_meta"] for x in samples]
+        for i,samples in enumerate(loader):
+            metas=[x[2]["image_meta"] for x in samples]
             if any((m["sequence"],m["curr_time_org"],m["has_gt"]) !=
                    (metas[0]["sequence"],metas[0]["curr_time_org"],metas[0]["has_gt"]) for m in metas):
                 raise ValueError("Misaligned teachers")
@@ -133,7 +145,10 @@ def main(args):
         if not passed:raise SystemExit("Pseudo quality gate failed; labels were not generated")
     else:
         if audit["grid_sha256"]!=data[0].manifest["grid_sha256"]:raise ValueError("Audit grid differs")
-        result=dict(format="dsec_async_pseudo_v1",audit_passed=True,audit_sha256=file_sha256(args.audit),
+        shutil.copyfile(args.audit,out/"teacher_audit.json")
+        result=dict(format="dsec_async_pseudo_v1",audit_passed=audit["passed"],audit_sha256=file_sha256(args.audit),
+            audit_file="teacher_audit.json",audit_override=dict(enabled=not audit["passed"],
+                reason=args.exploration_reason if not audit["passed"] else "",failed_checks=audit_failures(audit)),
             teachers=provenance,teacher_protocol=protocol,confidence=args.confidence,grid_sha256=data[0].manifest["grid_sha256"],
             split="train",files=files,coverage=pseudo_pixels/max(1,all_pixels),
             loss_normalization="accepted pixels, independent of GT CE; weight ramp")
@@ -153,7 +168,14 @@ if __name__=="__main__":
     p.add_argument("--min-class-precision",type=float,default=.70)
     p.add_argument("--min-class-pixels",type=int,default=1000)
     p.add_argument("--audit")
+    p.add_argument("--workers",type=int,default=0,help="CPU prefetch workers; chronological inference is unchanged")
+    p.add_argument("--allow-failed-audit",action="store_true",help="Explicit exploratory generation; preserve failed audit")
+    p.add_argument("--exploration-reason",default="")
     args=p.parse_args()
+    if args.workers < 0:p.error("--workers must be nonnegative")
+    if args.allow_failed_audit and (args.mode!="generate" or not args.exploration_reason.strip()):
+        p.error("--allow-failed-audit requires generate mode and --exploration-reason")
+    if args.exploration_reason and not args.allow_failed_audit:p.error("--exploration-reason requires --allow-failed-audit")
     if any(not 0<=getattr(args,k)<=1 for k in ("confidence","min_precision","min_coverage","min_class_precision")):
         p.error("Confidence/quality thresholds must be in [0,1]")
     required={"bc":("b_checkpoint","c_checkpoint","b_data","c_data"),

@@ -93,7 +93,7 @@ class BinaryTeacherTests(unittest.TestCase):
         import copy
         teachers = {'binary': {'checkpoint': '/frozen/best.pth', 'sha256': 'teacher-sha'}}
         protocol = {'teacher_mode': 'binary', 'binary_manifest_sha256': 'data-sha'}
-        audit = dict(passed=True, teachers=teachers, teacher_protocol=protocol,
+        audit = dict(format='dsec_async_audit_v1', passed=True, teachers=teachers, teacher_protocol=protocol,
                      confidence=.95, grid_sha256='grid')
         validate_audit(audit, teachers, protocol, .95, 'grid')
         for key, value in [('passed', False), ('teachers', {}), ('confidence', .9),
