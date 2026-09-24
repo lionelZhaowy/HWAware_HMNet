@@ -97,9 +97,9 @@ class HMDet(BlockBase):
 
         self.bbox_head = self.bbox_head.compile(backend, fp16, input_shapes)
 
-    def forward(self, list_events, list_image_metas, list_gt_bboxes, list_gt_labels, list_ignore_masks, init_states=True) -> Tensor:
+    def forward(self, list_events, list_image_metas, list_gt_bboxes, list_gt_labels, list_ignore_masks, init_states=True, temporal_state=None) -> Tensor:
         if is_frame_model(self):
-            return frame_loss(self, list_events, None, list_image_metas, list_gt_labels, 'detection', list_gt_bboxes, list_ignore_masks)
+            return frame_loss(self, list_events, None, list_image_metas, list_gt_labels, 'detection', list_gt_bboxes, list_ignore_masks, temporal_state=temporal_state)
         if init_states:
             self.idx_offset = 0
 
@@ -123,9 +123,9 @@ class HMDet(BlockBase):
 
         return outputs
 
-    def inference(self, list_events, list_image_metas, speed_test=False) -> Tensor:
+    def inference(self, list_events, list_image_metas, speed_test=False, temporal_state=None) -> Tensor:
         if is_frame_model(self):
-            return frame_inference(self, list_events, None, list_image_metas, 'detection')
+            return frame_inference(self, list_events, None, list_image_metas, 'detection', temporal_state=temporal_state)
         output = []
         output_image_metas = []
         d0 = self.devices[0]
