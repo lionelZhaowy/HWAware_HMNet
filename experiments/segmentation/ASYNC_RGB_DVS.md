@@ -79,6 +79,8 @@ CUDA_VISIBLE_DEVICES=0 ./scripts/hmnet-python scripts/train_async.py --single --
 
 ## 阶段二前置：审核并生成共享伪标签
 
+新增可选同步二值教师（`v1.2_T.1`）及二值+C一致性，准备、审核与训练见 [BINARY_TEACHER.md](BINARY_TEACHER.md)。下文保留原B+C模式；所有模式均需通过相同质量门槛，不能仅凭test排名跳过审核。
+
 必须等待两组阶段一有效权重；不可拿本次冒烟权重生成正式监督。以下整段在B工程终端执行，先设路径：
 
 ```bash
