@@ -13,6 +13,7 @@ import hashlib,json,importlib.util
 import numpy as np
 import h5py
 from hmnet.dataset.task_frames import SCHEMA,dat_map,bound,sha_file
+from hmnet.dataset.gen1_windows import GEN1_WINDOW_INDEX, exact_window_ranges
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -38,12 +39,14 @@ def save(out,split,kind,samples,sources,**extras):
 def gen1_sequence(label):
     path=label.with_name(label.name.replace('_bbox.npy','_td.dat'))
     if not path.is_file():raise FileNotFoundError(path)
-    a=dat_map(path);ts=a['t'];labels=np.load(label);field='ts' if 'ts' in labels.dtype.names else 't'
+    a=dat_map(path);labels=np.load(label);field='ts' if 'ts' in labels.dtype.names else 't'
+    targets=np.unique(labels[field]).astype(np.int64)
+    starts,ends,counts,audit=exact_window_ranges(a,targets)
     sources=[source_row(path),source_row(label,True)];samples=[]
-    for end in np.unique(labels[field]).astype(np.int64):
+    for end,lo,hi,count in zip(targets,starts,ends,counts):
         samples.append(dict(file=str(path),label_file=str(label),sequence=path.stem,target_us=int(end),
-            event_start=bound(ts,int(end)-50000),event_end=bound(ts,int(end),True)))
-    return samples,sources
+            event_start=int(lo),event_end=int(hi),event_count=int(count)))
+    return samples,sources,dict(file=str(path),**audit)
 
 
 def gen1(args):
@@ -51,12 +54,12 @@ def gen1(args):
         files=sorted((args.source/'detection_dataset_duration_60s_ratio_1.0'/split).glob('*_bbox.npy'))
         if not files:raise FileNotFoundError(split)
         if args.sequences:files=files[:args.sequences]
-        samples=[];sources=[]
+        samples=[];sources=[];audits=[]
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
-            for i,(rows,inputs) in enumerate(pool.map(gen1_sequence,files)):
-                samples.extend(rows);sources.extend(inputs)
+            for i,(rows,inputs,audit) in enumerate(pool.map(gen1_sequence,files)):
+                samples.extend(rows);sources.extend(inputs);audits.append(audit)
                 if i%25==0:print('GEN1',split,i+1,len(files),flush=True)
-        save(args.output,split,'gen1',samples,sources)
+        save(args.output,split,'gen1',samples,sources,gen1_window_index=GEN1_WINDOW_INDEX,gen1_audit=audits)
 
 
 def get_times(path):

@@ -45,7 +45,7 @@ RVT保持冻结实现：10bin×两极性，按窗口首末事件分桶、极性�
 ```bash
 ./scripts/hmnet-python scripts/prepare_task_frames.py gen1 \
   --source /data/lab_dataset/RGB_DVS_Fusion/GEN1/source \
-  --output /data/lab_dataset/RGB_DVS_Fusion/GEN1/preprocessed/hmnet_v12t_raw_v1
+  --output /data/lab_dataset/RGB_DVS_Fusion/GEN1/preprocessed/hmnet_v12t_raw_v2
 ./scripts/hmnet-python scripts/prepare_task_frames.py eventscape \
   --source /data/lab_dataset/RGB_DVS_Fusion/Eventscape/source \
   --output /data/lab_dataset/RGB_DVS_Fusion/Eventscape/preprocessed/hmnet_v12t_raw_v1
@@ -116,7 +116,7 @@ Binary分支用对应binary路径。GEN1复用现有COCO转换和pycocotools：c
 # 分支/任务/数据必须与checkpoint相符。GEN1示例：
 ./scripts/hmnet-python scripts/export_task_temporal.py \
   --checkpoint logs/detection/gen1_rvt/checkpoint.pth \
-  --data-root /data/lab_dataset/RGB_DVS_Fusion/GEN1/preprocessed/hmnet_v12t_raw_v1 \
+  --data-root /data/lab_dataset/RGB_DVS_Fusion/GEN1/preprocessed/hmnet_v12t_raw_v2 \
   --split val --output artifacts/onnx/trained
 # 骨干图：同命令追加 --backbone-only。
 ```
@@ -126,3 +126,13 @@ Eventscape同样使用val，MVSEC使用day1；各自提供对应root/checkpoint�
 导出会完成全部真实序列、全零、reset及融合空事件检查，写 `.report.json` 后再因数值失败返回2。容差保持atol1e-3/rtol1e-4；各后端独立反馈自己的状态。当前12份诊断图结构通过，历史状态仍有超差；不能视为数值一致性或部署验收。初始化来源是官方B1＋随机任务头经过3步诊断更新，未进行正式任务训练。
 
 开发检查：`scripts/check_task_temporal.py`（结构/初始化/梯度/状态），`check_task_data.py`（边界/高计数/真实split，需要先准备artifacts/data_smoke），`check_task_resume.py --dataset ... --representation ... --data-root ...`（真实batch8三步vs2+1，保持预算），`check_task_contracts.py`（已有GEN1诊断checkpoint的错配拒绝）。测试输出拒绝覆盖或需另建目录，旧失败证据单独保留。四工程公共文件由明确清单逐项SHA核对；没有跨工程绝对import。
+
+## GEN1 时间戳回退修复
+
+GEN1原始DAT存在局部时间戳回退；曾在seed42/batch8第721个batch触发排序检查。现在预处理完整扫描每个DAT，以50ms闭区间事件集合确定准确物理范围和event_count，再在读取时按窗口筛选并稳定排序。不能对未排序原始时间戳做二分，也不能仅在旧索引读出的窗口里排序后宣称边界事件完整。两种表示共用同一逻辑，保留坐标/极性检查和RVT冻结算法。
+
+GEN1默认索引改为 `GEN1/preprocessed/hmnet_v12t_raw_v2`；旧v1索引显式拒绝，Eventscape/MVSEC保持v1。新manifest和checkpoint data_contract记录 `full_scan_closed_window_stable_sort_v2`，新旧训练契约不兼容；两个旧失败实验均未产生正式checkpoint，修复后使用新输出目录从官方B1初始化重训，保留原失败日志。模型结构/任务头未变，不需要重新导出结构ONNX；既有ONNX状态数值失败结论不变。
+
+全量v2生成后才写COMPLETE.json。正在生成时不要重复运行准备命令；只增加索引，不复制DAT。独立回归：`./scripts/hmnet-python scripts/check_gen1_windows.py`，覆盖跨块回退、闭区间端点、重复时间戳稳定顺序、空窗口、坐标拒绝及旧索引拒绝。
+
+正式重训应给新输出目录：RVT用 `--output logs/detection/gen1_rvt_v2`，Binary用 `--output logs/detection/gen1_binary_v2`，保持100epoch/batch8/workers2/BF16/seed42。默认输出仍保留旧名称以防悄悄迁移历史实验，训练器拒绝覆盖它。

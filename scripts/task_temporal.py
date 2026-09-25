@@ -26,7 +26,7 @@ def configuration(args):
     config=SimpleNamespace(task='detection' if kind=='gen1' else 'depth',dataset=kind,
         event_representation=rep,event_channels=20 if rep=='rvt_histogram' else 2,
         modality='rgbdvs' if kind=='eventscape' else 'dvs',fusion_mode='add',temporal_window=2,
-        data_root=args.data_root or f'/data/lab_dataset/RGB_DVS_Fusion/{DATA_NAMES[kind]}/preprocessed/hmnet_v12t_raw_v1',
+        data_root=args.data_root or f'/data/lab_dataset/RGB_DVS_Fusion/{DATA_NAMES[kind]}/preprocessed/hmnet_v12t_raw_v{2 if kind == "gen1" else 1}',
         deterministic=True,epochs=args.epochs,updates=None,batch_size=args.batch,accumulation=1,workers=args.workers,
         learning_rate=2e-4,weight_decay=.01,precision='bf16',lr_schedule='warmup_cosine',
         min_learning_rate=2e-6,warmup_epochs=5,warmup_start_factor=.1,prefetch_factor=1,
