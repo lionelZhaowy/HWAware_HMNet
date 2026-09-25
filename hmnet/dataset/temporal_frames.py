@@ -24,7 +24,7 @@ class SequenceBatchSampler:
             raise ValueError("Global sequence batch must be divisible by world size")
         self.dataset, self.batch_size = dataset, batch_size
         self.rank, self.world_size, self.training, self.seed = rank, world_size, training, seed
-        self.epoch = 0
+        self.epoch, self.skip = 0, 0
         groups = defaultdict(list)
         for i, s in enumerate(dataset.samples):
             groups[s["sequence"]].append(i)
@@ -38,8 +38,15 @@ class SequenceBatchSampler:
         if training and (len(dataset) < world_size or 0 < tail < world_size):
             raise ValueError("Final batch cannot feed all ranks; use fewer GPUs")
 
-    def set_epoch(self, epoch):
-        self.epoch = epoch
+    def set_epoch(self, epoch, skip=0):
+        """`skip` batches of `epoch` were already consumed before a resume.
+
+        Swallowing them here keeps the fast-forward pure index arithmetic, so the
+        loader never asks a worker to decode a batch the trainer would discard.
+        """
+        if skip < 0 or (self.training and skip > len(self)):
+            raise ValueError("Resume cursor is outside the epoch")
+        self.epoch, self.skip = epoch, skip
 
     def __len__(self):
         if self.training:
@@ -59,6 +66,7 @@ class SequenceBatchSampler:
             # One consistent transform per uninterrupted lane, both modalities.
             flips = torch.randint(2, (self.batch_size,), generator=rng).tolist()
             previous = [None]*self.batch_size
+            skipped = 0
             for t in range(max(map(len, lanes))):
                 batch=[]
                 for slot, indices in enumerate(lanes):
@@ -69,8 +77,14 @@ class SequenceBatchSampler:
                            not 0 < sample["target_us"]-old[1] <= getattr(self.dataset, "reset_gap_us", 75000))
                     batch.append((i, slot, reset, bool(flips[slot]) and self.dataset.augment))
                     previous[slot]=(sample["sequence"], sample["target_us"])
-                if batch:
-                    yield batch
+                if not batch:
+                    continue
+                # Resumed batches still advance `previous`, so the first yielded
+                # batch carries the exact reset flags a full replay would produce.
+                if skipped < self.skip:
+                    skipped += 1
+                    continue
+                yield batch
         else:
             # Whole sequences are independent; ranks with no sequence still join
             # the final metric all-reduce but do no model forward collectives.
