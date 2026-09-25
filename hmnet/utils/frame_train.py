@@ -358,19 +358,29 @@ def _run(config, args, runtime):
         ), indent=2))
     runtime.barrier()
 
+    # A cursor at the end of an epoch means that epoch completed. Advancing to the
+    # next epoch is the same stream without re-reading a single sample.
+    if cursor >= len(loader):
+        epoch, cursor = epoch + 1, 0
+    if runtime.primary and cursor:
+        print(json.dumps(dict(resume_fast_forward=dict(data_epoch=epoch, batches=cursor))), flush=True)
+
     def batches(start_epoch, start_cursor):
-        data_epoch = start_epoch
+        data_epoch, consumed, skip = start_epoch, start_cursor, start_cursor
         while True:
             generator.manual_seed(args.seed + data_epoch)
             if temporal:
-                sampler.set_epoch(data_epoch)
+                sampler.set_epoch(data_epoch, skip)
             if hasattr(dataset, "set_epoch"):
                 dataset.set_epoch(data_epoch, args.seed)
             for idx, batch in enumerate(loader):
-                if data_epoch == start_epoch and idx < start_cursor:
+                # Sequence lanes fast-forward inside the sampler by index alone;
+                # other samplers can only draw the resumed batches and drop them.
+                if not temporal and idx < skip:
                     continue
-                yield batch, data_epoch, idx + 1
-            data_epoch += 1
+                consumed += 1
+                yield batch, data_epoch, consumed
+            data_epoch, consumed, skip = data_epoch + 1, 0, 0
 
     iterator = batches(epoch, cursor)
     torch.cuda.reset_peak_memory_stats()
