@@ -16,6 +16,7 @@ from torch.utils.data import Dataset
 from hmnet.models.base.event_repr.rvt_histogram import RVTHistogram
 from hmnet.models.base.event_repr.polarity import polarity_counts, input_spec
 from hmnet.dataset.vendor.dat_events_tools import parse_header, load_td_data
+from hmnet.dataset.gen1_windows import GEN1_WINDOW_INDEX
 
 SCHEMA = 'task_raw_label_windows_v1'
 SIZES = {'gen1': (240,304), 'eventscape': (256,512), 'mvsec': (260,346)}
@@ -61,6 +62,8 @@ class TaskFrames(Dataset):
         diagnostic=json.loads(completion.read_text())['diagnostic_subset']
         if self.manifest['schema']!=SCHEMA:raise ValueError('Unknown raw index schema')
         self.kind=self.manifest['kind'];self.split=split
+        if self.kind=='gen1' and self.manifest.get('gen1_window_index')!=GEN1_WINDOW_INDEX:
+            raise ValueError('Legacy GEN1 binary-search index is unsafe for unordered DAT timestamps; rebuild into hmnet_v12t_raw_v2')
         self.representation=representation;self.augment=augment
         self.height,self.width=SIZES[self.kind]
         self.modality='rgbdvs' if self.kind=='eventscape' else 'dvs'
@@ -74,6 +77,8 @@ class TaskFrames(Dataset):
             diagnostic_subset=bool(limit) or diagnostic,limit=limit,reset_gap_us=self.reset_gap_us,
             rgb_pairing='latest_not_after_gt_max_50ms' if self.modality=='rgbdvs' else None,
             depth='meters_raw_no_interpolation',size=[self.height,self.width])
+        if self.kind=='gen1':
+            self.data_contract['gen1_window_index']=GEN1_WINDOW_INDEX
         self._verify_sources()
 
     def _verify_sources(self):
@@ -111,6 +116,11 @@ class TaskFrames(Dataset):
             if np.any((pol!=-1)&(pol!=1)):raise ValueError('MVSEC expected signed polarity')
             ev=np.column_stack([ts,a[:,:2].astype(np.int64),(pol+1)//2])
         ev=ev[(ev[:,0]>=start)&(ev[:,0]<=end)]
+        if self.kind=='gen1':
+            if len(ev)!=s['event_count']:
+                raise ValueError(f"GEN1 window event count mismatch: {s['file']} at {end}")
+            if len(ev)>1 and np.any(ev[1:,0]<ev[:-1,0]):
+                ev=ev[np.argsort(ev[:,0],kind='stable')]
         return np.ascontiguousarray(ev,dtype=np.int64)
 
     def __getitem__(self,key):
