@@ -157,4 +157,11 @@ def main():
     if args.action=='train':run(config,args)
     else:evaluate(config,args)
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    import sys
+    defaults=tomllib.loads((ROOT/'experiments/task_temporal/experiment.toml').read_text())
+    explicit=sys.argv[sys.argv.index('--dataset')+1] if '--dataset' in sys.argv else None
+    if explicit=='peod' or (explicit is None and defaults['dataset']=='peod'):
+        from scripts.peod import main as peod_main
+        peod_main()
+    else: main()

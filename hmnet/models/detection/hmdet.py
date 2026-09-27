@@ -99,7 +99,9 @@ class HMDet(BlockBase):
 
     def forward(self, list_events, list_image_metas, list_gt_bboxes, list_gt_labels, list_ignore_masks, init_states=True, temporal_state=None) -> Tensor:
         if is_frame_model(self):
-            return frame_loss(self, list_events, None, list_image_metas, list_gt_labels, 'detection', list_gt_bboxes, list_ignore_masks, temporal_state=temporal_state)
+            images = list_events.get('images') if isinstance(list_events, dict) else None
+            events = list_events.get('events') if isinstance(list_events, dict) else list_events
+            return frame_loss(self, events, images, list_image_metas, list_gt_labels, 'detection', list_gt_bboxes, list_ignore_masks, temporal_state=temporal_state)
         if init_states:
             self.idx_offset = 0
 
@@ -125,7 +127,9 @@ class HMDet(BlockBase):
 
     def inference(self, list_events, list_image_metas, speed_test=False, temporal_state=None) -> Tensor:
         if is_frame_model(self):
-            return frame_inference(self, list_events, None, list_image_metas, 'detection', temporal_state=temporal_state)
+            images = list_events.get('images') if isinstance(list_events, dict) else None
+            events = list_events.get('events') if isinstance(list_events, dict) else list_events
+            return frame_inference(self, events, images, list_image_metas, 'detection', temporal_state=temporal_state)
         output = []
         output_image_metas = []
         d0 = self.devices[0]

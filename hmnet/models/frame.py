@@ -46,7 +46,7 @@ def frame_loss(model, events, images, metas, targets, kind, boxes=None, ignore=N
     if not keep:
         zero = sum(p.sum() * 0 for p in model.parameters())
         return dict(loss=zero, log_vars={}, num_samples=0, skip_step=True, temporal_state=next_state)
-    ev = events[keep] if torch.is_tensor(events) else [events[i] for i in keep]
+    ev = None if events is None else (events[keep] if torch.is_tensor(events) else [events[i] for i in keep])
     im = [images[i] for i in keep] if images is not None else None
     features = ([f[keep] for f in all_features] if temporal
                 else list(frame_features(model, ev, im)))

@@ -11,7 +11,7 @@ from hmnet.models.depth import HMDepth
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def build_frame_task(task, pretrained=None, mvsec=False, modality=None, fusion_mode="add", temporal_window=0, event_channels=20):
+def build_frame_task(task, pretrained=None, mvsec=False, modality=None, fusion_mode="add", temporal_window=0, event_channels=20, num_classes=None, stable_seed=None):
     if task not in ("segmentation", "detection", "depth"):
         raise ValueError(task)
     name = "hmnet_B3_yolox.py" if task == "detection" else "hmnet_B3.py"
@@ -35,6 +35,7 @@ def build_frame_task(task, pretrained=None, mvsec=False, modality=None, fusion_m
     head = copy.deepcopy(base.head)
     if task == "detection":
         head["strides"] = [8, 16, 32]
+        if num_classes is not None: head["num_classes"] = num_classes
     if task == "depth" and mvsec:
         head.update(min_depth=1.978, max_depth=80)
     cls = {"segmentation": HMSeg, "detection": HMDet, "depth": HMDepth}[task]
@@ -43,6 +44,25 @@ def build_frame_task(task, pretrained=None, mvsec=False, modality=None, fusion_m
         positional.append(copy.deepcopy(base.aux_head))
     model = cls(*positional, devices=[torch.device("cuda:0")])
     model.init_weights()
+    if stable_seed is not None:
+        import hashlib
+        from hmnet.models.base.init import init_transformer
+        modules = [("event_encoder", getattr(model.backbone, "event_encoder", None)),
+                   ("rgb_encoder", getattr(model.backbone, "rgb_encoder", None)),
+                   ("event_proj", getattr(model.backbone, "event_proj", None)),
+                   ("rgb_proj", getattr(model.backbone, "rgb_proj", None)),
+                   ("neck", model.neck), ("bbox_head", model.bbox_head)]
+        for name, component in modules:
+            if component is None: continue
+            with torch.random.fork_rng(devices=[]):
+                seed = stable_seed + int.from_bytes(hashlib.sha256(name.encode()).digest()[:4], "little")
+                torch.manual_seed(seed)
+                for layer in component.modules():
+                    if hasattr(layer, "reset_parameters"): layer.reset_parameters()
+                init_transformer(component.modules())
+                if name in ("neck", "bbox_head"): component.init_weights()
+        model.backbone.init_weights()
+
     if event_channels != 20:
         if event_channels != 2 or not model.backbone.use_events:
             raise ValueError("Input ablations support two polarity channels")
