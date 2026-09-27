@@ -25,11 +25,13 @@ def unpack(batch, task):
     data, targets, metadata = batch
     metas = [m["image_meta"] for m in metadata]
     if task == "detection":
-        events = (
-            data
-            if torch.is_tensor(data)
-            else torch.stack([d["events"] if isinstance(d, dict) else d for d in data])
-        )
+        if isinstance(data, dict):
+            events = data
+        elif isinstance(data, (list, tuple)) and isinstance(data[0], dict):
+            events = {key: (torch.stack([d[key] for d in data]) if data[0][key] is not None else None)
+                      for key in ("events", "images")}
+        else:
+            events = data if torch.is_tensor(data) else torch.stack(data)
         return (
             events,
             metas,
@@ -108,6 +110,10 @@ def write_tensorboard(writer, record):
         writer.add_scalar(f"performance/{key}", record[key], step)
     for split in ("dev", "fixed_train"):
         if split not in record:
+            continue
+        if "mAP" in record[split]:
+            for metric in ("mAP", "AP50", "AP75"):
+                writer.add_scalar(f"{split}/{metric}", record[split][metric], step)
             continue
         writer.add_scalar(f"{split}/mIoU", record[split]["miou"], step)
         for class_id, iou in enumerate(record[split]["class_iou"]):
@@ -232,18 +238,19 @@ def _run(config, args, runtime):
     dataset = config.get_dataset()
     generator = torch.Generator()
     temporal = bool(getattr(config, "temporal_window", 0))
+    sequential = temporal or getattr(config, "sequential_sampling", False)
     if temporal and config.accumulation != 1:
         raise ValueError("Temporal first experiment requires accumulation=1")
     sampler = (SequenceBatchSampler(dataset, config.batch_size, runtime.rank,
                                    runtime.world_size, training=True, seed=args.seed)
-               if temporal else GlobalBatchSampler(
+               if sequential else GlobalBatchSampler(
                    RandomSampler(dataset, generator=generator), config.batch_size,
                    runtime.rank, runtime.world_size))
     workers = runtime.workers(config.workers)
     loader = DataLoader(
         dataset, batch_sampler=sampler, num_workers=workers,
         **({"prefetch_factor": getattr(config, "prefetch_factor", 1)} if workers else {}),
-        generator=generator, collate_fn=collate_keep_dict, pin_memory=True,
+        generator=generator, collate_fn=getattr(dataset, "collate_fn", collate_keep_dict), pin_memory=True,
         persistent_workers=workers > 0 and not hasattr(dataset, "set_epoch"),
     )
     max_updates = resolve_training_updates(config, len(loader))
@@ -269,6 +276,11 @@ def _run(config, args, runtime):
             raise ValueError("Diagnostic subset requires stop-after")
         contract.update(task=config.task, deterministic=getattr(config, "deterministic", False), event_input=dataset.input_spec, event_data=dataset.data_contract,
                         initialization=getattr(config, "initialization_contract", None))
+    if sequential:
+        contract["sampling"] = dict(kind="balanced_sequence_lanes_v1", seed=args.seed,
+            reset_gap_us=dataset.reset_gap_us, manifest_sha256=manifest_signature(dataset))
+    if hasattr(config, "peod_contract"):
+        contract["peod"] = config.peod_contract
     if temporal:
         contract["temporal"] = dict(window=2, branch="dvs", state_dtype="float32",
             reduction_dtype="float32", tbptt=1, sampler="balanced_sequence_lanes_v1",
@@ -369,14 +381,14 @@ def _run(config, args, runtime):
         data_epoch, consumed, skip = start_epoch, start_cursor, start_cursor
         while True:
             generator.manual_seed(args.seed + data_epoch)
-            if temporal:
+            if sequential:
                 sampler.set_epoch(data_epoch, skip)
             if hasattr(dataset, "set_epoch"):
                 dataset.set_epoch(data_epoch, args.seed)
             for idx, batch in enumerate(loader):
                 # Sequence lanes fast-forward inside the sampler by index alone;
                 # other samplers can only draw the resumed batches and drop them.
-                if not temporal and idx < skip:
+                if not sequential and idx < skip:
                     continue
                 consumed += 1
                 yield batch, data_epoch, consumed
@@ -396,9 +408,14 @@ def _run(config, args, runtime):
             optimizer.zero_grad(set_to_none=True)
             started = time.perf_counter()
             loss_sum, samples, accepted, attempts = 0., 0, 0, 0
+            data_wait = 0.
+            gpu_start = torch.cuda.Event(enable_timing=True)
+            gpu_end = torch.cuda.Event(enable_timing=True)
             component_sums = defaultdict(float)
             while accepted < config.accumulation:
+                data_started = time.perf_counter()
                 batch, epoch, cursor = next(iterator)
+                data_wait += time.perf_counter() - data_started
                 attempts += 1
                 if attempts > max(len(loader)*2, config.accumulation*4):
                     raise RuntimeError("No sufficient supervised windows: check labels and depth ranges")
@@ -412,6 +429,7 @@ def _run(config, args, runtime):
                     if not runtime.all_true(pixels > 0):
                         raise ValueError("DDP batch has a rank with no valid labels; use fewer GPUs")
                     weight = runtime.world_size * pixels / total_pixels
+                if accepted == 0: gpu_start.record()
                 with torch.amp.autocast("cuda", enabled=amp, dtype=amp_dtype):
                     unpacked = unpack(batch, config.task)
                     stream_metas = unpacked[1] if config.task == "detection" else unpacked[2]
@@ -447,11 +465,14 @@ def _run(config, args, runtime):
             scaler.step(optimizer)
             scaler.update()
             step += 1
+            gpu_end.record()
             torch.cuda.synchronize()
             seconds = runtime.reduce([time.perf_counter()-started], dist.ReduceOp.MAX)[0]
             names = sorted(component_sums)
             sums = runtime.reduce([loss_sum, samples] + [component_sums[name] for name in names])
             record = dict(
+                wall_time=time.time(), gpu_elapsed_ms=gpu_start.elapsed_time(gpu_end),
+                data_wait_seconds=data_wait, peak_reserved_mib=torch.cuda.max_memory_reserved()/2**20,
                 step=step, epoch=epoch+1, data_epochs=epoch+cursor/len(loader),
                 stage_epochs=step*config.accumulation/len(loader),
                 loss=sums[0]/runtime.world_size/accepted, seconds=seconds,
@@ -463,12 +484,13 @@ def _run(config, args, runtime):
             )
             is_best = False
             if validation is not None and (step == 1 or step % eval_interval == 0 or step == max_updates):
-                record["dev"] = evaluate_seg(
+                record["dev"] = config.evaluate_validation(raw_model, validation) if hasattr(config, "evaluate_validation") else evaluate_seg(
                     raw_model, validation, getattr(config, "eval_batch_size", config.batch_size),
                     workers=config.workers, prefetch_factor=getattr(config, "prefetch_factor", 1), runtime=runtime)
-                is_best = record["dev"]["miou"] > best_miou
+                selection_metric = record["dev"].get("mAP", record["dev"].get("miou"))
+                is_best = selection_metric > best_miou
                 if is_best:
-                    best_miou, best_step = record["dev"]["miou"], step
+                    best_miou, best_step = selection_metric, step
                 record.update(best_miou=best_miou, best_step=best_step)
                 if getattr(config, "overfit", 0):
                     record["fixed_train"] = evaluate_seg(
@@ -511,6 +533,11 @@ def _run(config, args, runtime):
                 break
     # Close the generator before returning so bounded diagnostics stop loader workers.
     iterator.close()
+    # Persistent workers outlive the generator. Join their pin-memory/queue threads
+    # before interpreter teardown (large prefetched batches otherwise may abort).
+    if getattr(loader, "_iterator", None) is not None:
+        loader._iterator._shutdown_workers()
+        loader._iterator = None
     return raw_model
 
 

@@ -428,7 +428,7 @@ class YOLOXHead(BlockBase):
             grids.append(grid)
             #shape = grid.shape[:2]
             #strides.append(torch.full((*shape, 1), stride))
-            strides.append(torch.full((1, hsize*wsize, 1), stride))
+            strides.append(torch.full((1, hsize*wsize, 1), stride, device=outputs.device))
 
         grids = torch.cat(grids, dim=1).type(dtype)
         strides = torch.cat(strides, dim=1).type(dtype)
