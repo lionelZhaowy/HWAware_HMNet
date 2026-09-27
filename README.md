@@ -1,4 +1,4 @@
-> **PEOD four-experiment checkout:** current protocol, validation status and commands are in [PEOD.md](experiments/task_temporal/PEOD.md). Historical sections below describe the inherited source project.
+> **PEOD 四组实验工程：** 当前协议、验收状态及运行命令见[实验说明](experiments/task_temporal/PEOD.md)。下文保留继承来源工程的历史说明。
 
 > 本分支同步v1.2_T检测/深度实验请先读[新任务入口](experiments/task_temporal/README.md)；下文保留的旧frame/HMNet命令不代表新M=2实验。
 
