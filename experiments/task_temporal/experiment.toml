@@ -1,2 +1,3 @@
-dataset = "gen1"
-representation = "rvt_histogram"
+dataset = "peod"
+modality = "rgbdvs"
+representation = "polarity_binary"
