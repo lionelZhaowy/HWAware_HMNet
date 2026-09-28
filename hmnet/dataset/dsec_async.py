@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 from hmnet.utils.pseudo_audit import validate_pseudo_audit
+from hmnet.utils.rgb_delay import rgb_delay, DELAY_POLICY
 
 
 class DSECAsync(Dataset):
@@ -62,7 +63,7 @@ class DSECAsync(Dataset):
             channels=2*self.manifest["bins"],boundary=self.manifest["boundary"],
             grid_sha256=self.manifest["grid_sha256"],manifest_sha256=self.signature,
             tbptt=2,rgb_delay_probability=self.delay_probability,
-            delay_policy="fixed_bernoulli_per_epoch_lane_sequence_one_rgb_frame",
+            delay_policy=DELAY_POLICY,
             rgb_latency_assumption="zero_transport_delay",cold_start="zero_rgb_features",
             phase=2 if self.pseudo_root else 1,pseudo_sha256=self.pseudo_signature,
             pseudo_weight=self.pseudo_weight if self.pseudo_root else 0.,
@@ -102,9 +103,7 @@ class DSECAsync(Dataset):
         sample = self.samples[index]
         if self.clips:
             # Fixed per lane/scene avoids toggling backwards to an older RGB cache.
-            token = f'{self.seed}/{self.epoch}/{slot}/{sample["sequence"]}'.encode()
-            draw = int.from_bytes(hashlib.sha256(token).digest()[:8],"big")/2**64
-            delay = int(draw < self.delay_probability)
+            delay = rgb_delay(self.seed, self.epoch, slot, sample["sequence"], self.delay_probability)
             indices = [sample["row_index"]-1,sample["row_index"]]
             if indices[0] < 0 or self.rows[indices[0]]["has_gt"]:
                 raise ValueError("Every GT needs exactly one preceding unlabelled step")

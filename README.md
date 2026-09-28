@@ -1,3 +1,7 @@
+# v1.2_T_1_wo_delay1：RGB延迟增强消融
+
+本工程为独立新实验；[数据、首次训练、断点恢复和评估口径](experiments/segmentation/RGB_DELAY_ABLATIONS.md)。正式训练尚未启动，以下保留父版通用说明。
+
 # Hierarchical Neural Memory Network
 
 This repo is a PyTorch implementation of HMNet proposed in our paper: [Hierarchical Neural Network for Low Latency Event Processing](https://hamarh.github.io/hmnet/).

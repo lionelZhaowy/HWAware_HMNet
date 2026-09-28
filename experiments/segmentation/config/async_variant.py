@@ -1,2 +1,3 @@
 VARIANT = "B"
-VERSION = "v1.2_T_1"
+VERSION = "v1.2_T_1_wo_delay1"
+RGB_DELAY_PROBABILITY = 0.0
