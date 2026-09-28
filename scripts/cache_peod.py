@@ -47,6 +47,16 @@ def main():
     with cache_writer_lock(out):
         build_cache(a,root,out)
 
+def check_capacity(used,current,free,budget,reserve,where):
+    guard=8*2**20
+    reasons=[]
+    if used+current+guard>budget:
+        reasons.append(f'缓存总量上限：已完成及临时缓存={(used+current)/2**30:.3f} GiB，单次写入预留=8 MiB，上限={budget/2**30:.3f} GiB；核对磁盘空间后调整 --max-cache-gib')
+    if free<reserve+guard:
+        reasons.append(f'磁盘剩余空间保护：可用={free/2**30:.3f} GiB，最低保留={reserve/2**30:.3f} GiB，另需8 MiB写入余量；请释放空间或更换存储位置')
+    if reasons:
+        raise RuntimeError(f'Cache capacity guard at {where}: '+ '; '.join(reasons)+'；原始数据和完整缓存保持不变')
+
 def build_cache(a,root,out):
     budget=int(a.max_cache_gib*2**30);reserve=int(a.reserve_gib*2**30)
     def pending():
@@ -82,8 +92,7 @@ def build_cache(a,root,out):
                 for i,s in enumerate(data.samples):
                     # At most 2 MiB uncompressed data is added per sample; 8 MiB guard includes HDF5 metadata.
                     f.flush();current=temp.stat().st_size
-                    if used+current+8*2**20>budget or shutil.disk_usage(out).free<reserve+8*2**20:
-                        raise RuntimeError(f'Cache capacity guard at {path.stem}/{i}: stop without changing originals')
+                    check_capacity(used,current,shutil.disk_usage(out).free,budget,reserve,f'{path.stem}/{i}')
                     ev=data.raw(i);rvt=represent(ev,'rvt_histogram',240,304).numpy().astype(np.uint8)
                     b=represent(ev,'polarity_binary',240,304).numpy().astype(np.uint8)
                     hist[i]=rvt;binary[i]=np.packbits(b,axis=-1)
