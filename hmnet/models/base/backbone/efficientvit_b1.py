@@ -97,7 +97,7 @@ class EfficientViTB1(nn.Module):
         return zero_memory(self.event_encoder, batch_size,
                            device or next(self.parameters()).device)
 
-    def forward(self, event_hist=None, rgb=None, temporal_state=None):
+    def forward(self, event_hist=None, rgb=None, temporal_state=None, rgb_valid=None):
         # Single-modality experiments instantiate only their active branch.
         # They do not replace an unused modality with zero input.
         if not torch.jit.is_tracing():
@@ -124,7 +124,15 @@ class EfficientViTB1(nn.Module):
             if self.cross_fusion:
                 return self._forward_cross_stage(event_hist, rgb)
             ev = self.event_encoder(event_hist) if self.use_events else None
-        im = self.rgb_encoder(rgb) if self.use_rgb else None
+        rgb_indices = None
+        if rgb_valid is not None:
+            if not self.fusion or self.fusion_mode != "add":
+                raise ValueError("Missing-RGB masking is validated only for Add fusion")
+            rgb_indices = torch.as_tensor(rgb_valid, device=rgb.device).bool().nonzero().flatten()
+            # Do not let unavailable images perturb RGB BN running statistics.
+            im = self.rgb_encoder(rgb.index_select(0, rgb_indices)) if len(rgb_indices) else None
+        else:
+            im = self.rgb_encoder(rgb) if self.use_rgb else None
         outputs = []
         for i in range(4):
             if self.cross_fusion:
@@ -135,6 +143,8 @@ class EfficientViTB1(nn.Module):
             feature = self.event_proj[i](ev[f"stage{i+1}"]) if ev is not None else None
             if im is not None:
                 rgb_feature = self.rgb_proj[i](im[f"stage{i+1}"])
+                if rgb_indices is not None:
+                    rgb_feature = torch.zeros_like(feature).index_copy(0, rgb_indices, rgb_feature)
                 if self.fusion_mode == "adaptive_add":
                     feature = self.gates[i](feature, rgb_feature)
                 else:

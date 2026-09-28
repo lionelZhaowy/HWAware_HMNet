@@ -7,7 +7,7 @@ def is_frame_model(model):
     return getattr(model.backbone, "input_format", None) == "histogram"
 
 
-def frame_features(model, events, images=None, temporal_state=None):
+def frame_features(model, events, images=None, temporal_state=None, metas=None):
     device = next(model.parameters()).device
     events = torch.stack(events) if isinstance(events, (list, tuple)) else events
     rgb = None
@@ -17,7 +17,10 @@ def frame_features(model, events, images=None, temporal_state=None):
         rgb = torch.stack(images) if isinstance(images, (list, tuple)) else images
         rgb = rgb.to(device)
     events = events.to(device) if getattr(model.backbone, "use_events", True) else None
-    return model.backbone(events, rgb, temporal_state=temporal_state)
+    kwargs = {}
+    if metas is not None and any(not m.get("rgb_valid", True) for m in metas):
+        kwargs["rgb_valid"] = [m.get("rgb_valid", True) for m in metas]
+    return model.backbone(events, rgb, temporal_state=temporal_state, **kwargs)
 
 
 def frame_loss(model, events, images, metas, targets, kind, boxes=None, ignore=None, temporal_state=None):
@@ -42,7 +45,7 @@ def frame_loss(model, events, images, metas, targets, kind, boxes=None, ignore=N
     if temporal:
         # Advance every observed stream, including an unlabelled frame. Filtering
         # supervision must not splice memory lanes or alter backbone BN batches.
-        all_features, next_state = frame_features(model, events, images, temporal_state)
+        all_features, next_state = frame_features(model, events, images, temporal_state, metas)
     if not keep:
         zero = sum(p.sum() * 0 for p in model.parameters())
         return dict(loss=zero, log_vars={}, num_samples=0, skip_step=True, temporal_state=next_state)
@@ -95,7 +98,7 @@ def frame_inference(model, events, images, metas, kind, temporal_state=None):
             results.extend(output)
             metadata.extend(selected)
         return (results if kind == "detection" else torch.stack(results)), metadata
-    features = frame_features(model, events, images, temporal_state)
+    features = frame_features(model, events, images, temporal_state, metas)
     if temporal:
         features, next_state = features
     pyramid = model.neck(list(features))

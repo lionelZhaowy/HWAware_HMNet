@@ -264,6 +264,10 @@ def _run(config, args, runtime):
         contract["temporal"] = dict(window=2, branch="dvs", state_dtype="float32",
             reduction_dtype="float32", tbptt=1, sampler="balanced_sequence_lanes_v1",
             reset_gap_us=75000, manifest_sha256=manifest_signature(dataset))
+    if hasattr(dataset, "rgb_delay_contract"):
+        if runtime.distributed:
+            raise ValueError("RGB delay ablation uses single-GPU BN, matching Async B")
+        contract["rgb_delay_augmentation"] = dataset.rgb_delay_contract()
     if runtime.primary:
         print(json.dumps(dict(training_contract=contract, batches_per_epoch=len(loader),
                               resolved_updates=max_updates, local_batch=config.batch_size // runtime.world_size)), flush=True)

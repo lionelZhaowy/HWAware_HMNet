@@ -2,6 +2,7 @@
 
 from hmnet.models.efficientvit_tasks import build_frame_task, ROOT
 from hmnet.dataset.dsec_frames import DSECFrames
+from hmnet.dataset.dsec_rgb_delay import DSECFramesRGBDelay
 
 
 class TrainSettings:
@@ -28,10 +29,12 @@ class TrainSettings:
     workers = 8
     # One prefetched batch per worker limits memory across three experiments.
     prefetch_factor = 1
-    output = str(ROOT / "logs/segmentation/efficientvit_b1_add_v12_T_bf16")
+    output = str(ROOT / "logs/segmentation/efficientvit_b1_add_v12_T_delay1_bf16")
     cache = (
         "/home/zhaowenyao24/Conda_prj/lab_dataset/DSEC_Semantic/preprocessed/dsec_b1"
     )
+    rgb_delay_probability = 0.5
+    rgb_catalog_root = "/home/zhaowenyao24/Conda_prj/lab_dataset/DSEC_Semantic/preprocessed/async_v1/dsec_async_B"
     resume = ""
     overfit = 0
 
@@ -45,8 +48,9 @@ class TrainSettings:
         )
 
     def get_dataset(self):
-        return DSECFrames(
-            self.cache, "train", augment=not self.overfit, limit=self.overfit or None
+        return DSECFramesRGBDelay(
+            self.cache, self.rgb_catalog_root, "train", augment=not self.overfit,
+            limit=self.overfit or None, delay_probability=self.rgb_delay_probability
         )
 
     def get_validation_dataset(self):
