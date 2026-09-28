@@ -4,7 +4,8 @@
 Enforces a total cache budget and free-space reserve BEFORE each sample write.
 Atomic sequence publication; raw sources remain required for validation/audit.
 """
-import argparse,json,time,shutil
+import argparse,json,time,shutil,fcntl,os,tempfile
+from contextlib import contextmanager
 from pathlib import Path
 import h5py
 import numpy as np
@@ -13,6 +14,29 @@ from PIL import Image
 from hmnet.dataset.peod_frames import PEODFrames,SCHEMA
 from hmnet.dataset.task_frames import represent
 
+@contextmanager
+def cache_writer_lock(out):
+    """One writer per shared cache, across all four experiment checkouts.
+
+    Keep the lock file inode: unlinking it permits a second independent lock.
+    The kernel releases flock automatically when a process exits.
+    """
+    out.mkdir(parents=True,exist_ok=True)
+    with (out/'.cache_writer.lock').open('a+') as lock:
+        try:
+            fcntl.flock(lock.fileno(),fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock.seek(0)
+            raise RuntimeError('共享缓存已有写入任务，拒绝重复启动；持锁信息：'+lock.read().strip()) from None
+        try:
+            lock.seek(0);lock.truncate()
+            lock.write(json.dumps(dict(pid=os.getpid(),started=time.time())))
+            lock.flush()
+            yield
+        finally:
+            fcntl.flock(lock.fileno(),fcntl.LOCK_UN)
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--root',default='/data/lab_dataset/RGB_DVS_Fusion/PEOD_orig/preprocessed/hmnet_v12t_240x304_v1')
@@ -20,6 +44,10 @@ def main():
     p.add_argument('--follow',action='store_true',help='Wait for new sequence indices, with the same hard space bounds')
     p.add_argument('--max-cache-gib',type=float,default=.5);p.add_argument('--reserve-gib',type=float,default=50.)
     a=p.parse_args();torch.set_num_threads(1);root=Path(a.root);out=root/'inputs';out.mkdir(exist_ok=True)
+    with cache_writer_lock(out):
+        build_cache(a,root,out)
+
+def build_cache(a,root,out):
     budget=int(a.max_cache_gib*2**30);reserve=int(a.reserve_gib*2**30)
     def pending():
         seen=set()
@@ -35,12 +63,14 @@ def main():
         row=json.loads(path.read_text());dest=out/path.with_suffix('.h5').name
         if dest.exists():
             with h5py.File(dest,'r') as f:
-                if f.attrs['source_signature']!=row['source_signature'] or f.attrs['schema']!=SCHEMA:raise ValueError('Stale input cache')
+                if not f.attrs.get('complete',False) or f.attrs['source_signature']!=row['source_signature'] or f.attrs['schema']!=SCHEMA or len(f['target_us'])!=len(row['samples']):raise ValueError('Stale input cache')
             continue
         data=PEODFrames.__new__(PEODFrames);data.samples=row['samples'];n=len(data.samples)
-        temp=dest.with_suffix('.tmp.h5');started=time.monotonic()
+        started=time.monotonic()
         used=sum(x.stat().st_size for x in out.glob('*.h5'))
-        if temp.exists():used-=temp.stat().st_size
+        # Exclusive unique file; cleanup can never unlink another writer's file.
+        fd,name=tempfile.mkstemp(prefix=dest.stem+'.',suffix='.tmp.h5',dir=out)
+        os.close(fd);temp=Path(name)
         try:
             with h5py.File(temp,'w') as f:
                 f.attrs['source_signature']=row['source_signature'];f.attrs['schema']=SCHEMA
