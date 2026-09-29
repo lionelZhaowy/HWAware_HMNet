@@ -30,11 +30,53 @@ def parser():
     p.add_argument('--eval-batch',type=int,default=32);p.add_argument('--workers',type=int,default=2)
     p.add_argument('--seed',type=int,default=42);p.add_argument('--limit',type=int,default=0);p.add_argument('--stop-after',type=int)
     p.add_argument('--precision',choices=['bf16','fp32'],default='bf16');p.add_argument('--device',default='cuda:0')
+    p.add_argument('--start-new-stage',action='store_true',help='Start a separate stage from a completed stage1 checkpoint; preserve optimizer/RNG/data cursor')
+    p.add_argument('--learning-rate',type=float,default=2e-4)
+    p.add_argument('--min-learning-rate',type=float,default=2e-6)
+    p.add_argument('--warmup-epochs',type=float,default=5.)
+    p.add_argument('--warmup-start-factor',type=float,default=.1)
     p.add_argument('--dump',help='JSONL predictions in original 1280x720 coordinates; scored without rerunning inference')
     return p
 
 
+def validate_stage_start(a):
+    if not a.start_new_stage and not (a.action=='train' and a.resume):
+        return
+    if a.start_new_stage and (a.action!='train' or not a.resume or not a.output):
+        raise ValueError('--start-new-stage requires train, --resume and explicit --output')
+    source=Path(a.resume).resolve()
+    saved=torch.load(source,map_location='cpu',weights_only=False)
+    # Reopening a stage2 checkpoint is an ordinary strict resume, not another reset.
+    if saved.get('stage_parent'):
+        if not a.output:
+            raise ValueError('Stage2 resume requires an explicit stage2 --output')
+        destination=Path(a.output).resolve()
+        parent=Path(saved['stage_parent']['checkpoint']).resolve().parent
+        if destination==parent or parent in destination.parents:
+            raise ValueError('Stage2 resume must not overwrite the stage1 output directory')
+        return
+    if not a.start_new_stage:
+        return
+    destination=Path(a.output).resolve()
+    contract=saved.get('training_contract',{})
+    if contract.get('event_data',{}).get('kind')!='peod':
+        raise ValueError('A PEOD stage1 checkpoint is required')
+    if destination==source.parent or source.parent in destination.parents:
+        raise ValueError('Stage2 output must be outside the stage1 output directory')
+    if destination.exists() and any(destination.iterdir()):
+        raise ValueError('Stage2 requires a new, empty output directory')
+    total=contract['schedule']['total_updates']
+    if total<=0 or saved['step']!=total:
+        raise ValueError(f'Stage1 is not complete: checkpoint step={saved["step"]}, required={total}; wait for its final checkpoint')
+    if not a.stop_after:
+        batches=(contract['train_samples']+contract['batch_size']-1)//contract['batch_size']
+        expected=(100*batches+contract['accumulation']-1)//contract['accumulation']
+        if contract['event_data']['diagnostic_subset'] or total!=expected:
+            raise ValueError('Formal stage2 requires a full-data, completed 100-epoch stage1')
+
+
 def configuration(a):
+    validate_stage_start(a)
     temporal=0 if a.modality=='rgb' else 2
     name=f'peod_{a.modality}_{"none" if a.modality=="rgb" else a.representation}'
     pretrained=ROOT/'pretrained/efficientvit_b1_r224.pth'
@@ -42,9 +84,9 @@ def configuration(a):
         event_channels=0 if a.modality=='rgb' else (20 if a.representation=='rvt_histogram' else 2),
         temporal_window=temporal,sequential_sampling=True,fusion_mode='add',data_root=a.data_root,
         deterministic=True,epochs=a.epochs,updates=None,batch_size=a.batch,eval_batch_size=a.eval_batch,
-        accumulation=1,workers=a.workers,prefetch_factor=1,learning_rate=2e-4,weight_decay=.01,
-        precision=a.precision,lr_schedule='warmup_cosine',min_learning_rate=2e-6,warmup_epochs=5,
-        warmup_start_factor=.1,eval_every_epochs=1,resume=a.resume or '',output=a.output or str(ROOT/'logs/detection'/name))
+        accumulation=1,workers=a.workers,prefetch_factor=1,learning_rate=a.learning_rate,weight_decay=.01,
+        precision=a.precision,lr_schedule='warmup_cosine',min_learning_rate=a.min_learning_rate,warmup_epochs=a.warmup_epochs,
+        warmup_start_factor=a.warmup_start_factor,eval_every_epochs=1,resume=a.resume or '',start_new_stage=a.start_new_stage,output=a.output or str(ROOT/'logs/detection'/name))
     c.initialization_contract=dict(official_b1_sha256=sha_file(pretrained),method='named_component_sha256_seed_v1',seed=a.seed,
         binary_stem='official_RGB_mean_times_3_over_2',init_from=None)
     c.peod_contract=dict(classes=['car','person','bus','truck','2-wheeler','3-wheeler'],workers=a.workers,

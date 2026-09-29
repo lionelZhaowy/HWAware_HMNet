@@ -146,3 +146,76 @@ CUDA_VISIBLE_DEVICES=2 CUBLAS_WORKSPACE_CONFIG=:4096:8 \
 四份整网和四份骨干 ONNX 位于各工程 `artifacts/peod/onnx/`，权重来源为 4 步冒烟。结构检查全部通过，**严格数值检查均有失败，未通过部署验收**。输入为 `[1,C,240,304]`，整网 NMS 前输出为 `[1,1505,11]`。含事件的模型显式输入/输出 7 个 FP32 状态：3×`[1,16,17,16]`、4×`[1,32,17,16]`。报告分别维护 PyTorch/ORT 状态反馈轨迹，容差固定 atol1e-3、rtol1e-4。全零测试指标准化后输入全零，不等于原始黑色 RGB。
 
 尚无完整 PEOD 正式训练或最终任务精度结果；GPU 短测和冒烟权重的 COCO 输出不能作为精度证据。
+
+## 独立stage2追加100轮
+
+四组共同追加100轮，batch128/workers2/eval batch32/BF16/seed42不变，峰值LR5e-5，2轮从2e-6预热（factor0.04），再余弦下降到2e-6。使用各自stage1完成100轮的末检查点，恢复模型、优化器、RNG、游标和DVS状态，仅重启阶段日程与best记录。低训练loss不保证val AP提高，该设置是统一续训实验而非已验证的最优参数。
+
+首次stage2需要独立空目录，禁止覆盖stage1或写入其子目录，未完成的父阶段会拒绝启动。请等待每组stage1自然结束，再在独立终端执行：
+
+### GPU2：RGB-only
+
+```bash
+cd /home/zhaowenyao24/Conda_prj/Detection_DVS/HWAware_HMNet_Det_PEOD_RGB_v1.2_T
+CUDA_VISIBLE_DEVICES=2 CUBLAS_WORKSPACE_CONFIG=:4096:8 \
+./scripts/hmnet-python scripts/task_temporal.py train \
+  --modality rgb --representation rvt_histogram \
+  --data-root /data/lab_dataset/RGB_DVS_Fusion/PEOD_orig/preprocessed/hmnet_v12t_240x304_v1 \
+  --device cuda:0 --epochs 100 --batch 128 --workers 2 --eval-batch 32 \
+  --seed 42 --precision bf16 \
+  --learning-rate 5e-5 --min-learning-rate 2e-6 \
+  --warmup-epochs 2 --warmup-start-factor 0.04 \
+  --start-new-stage --resume logs/detection/peod_rgb_none/checkpoint.pth \
+  --output logs/detection/peod_rgb_none_stage2_100ep
+```
+
+### GPU3：DVS-only RVT
+
+```bash
+cd /home/zhaowenyao24/Conda_prj/Detection_DVS/HWAware_HMNet_Det_PEOD_DVS_v1.2_T_RVT
+CUDA_VISIBLE_DEVICES=3 CUBLAS_WORKSPACE_CONFIG=:4096:8 \
+./scripts/hmnet-python scripts/task_temporal.py train \
+  --modality dvs --representation rvt_histogram \
+  --data-root /data/lab_dataset/RGB_DVS_Fusion/PEOD_orig/preprocessed/hmnet_v12t_240x304_v1 \
+  --device cuda:0 --epochs 100 --batch 128 --workers 2 --eval-batch 32 \
+  --seed 42 --precision bf16 \
+  --learning-rate 5e-5 --min-learning-rate 2e-6 \
+  --warmup-epochs 2 --warmup-start-factor 0.04 \
+  --start-new-stage --resume logs/detection/peod_dvs_rvt_histogram/checkpoint.pth \
+  --output logs/detection/peod_dvs_rvt_histogram_stage2_100ep
+```
+
+### GPU4：RGB-DVS RVT
+
+```bash
+cd /home/zhaowenyao24/Conda_prj/Detection_DVS/HWAware_HMNet_Det_PEOD_RGBDVS_v1.2_T_RVT
+CUDA_VISIBLE_DEVICES=4 CUBLAS_WORKSPACE_CONFIG=:4096:8 \
+./scripts/hmnet-python scripts/task_temporal.py train \
+  --modality rgbdvs --representation rvt_histogram \
+  --data-root /data/lab_dataset/RGB_DVS_Fusion/PEOD_orig/preprocessed/hmnet_v12t_240x304_v1 \
+  --device cuda:0 --epochs 100 --batch 128 --workers 2 --eval-batch 32 \
+  --seed 42 --precision bf16 \
+  --learning-rate 5e-5 --min-learning-rate 2e-6 \
+  --warmup-epochs 2 --warmup-start-factor 0.04 \
+  --start-new-stage --resume logs/detection/peod_rgbdvs_rvt_histogram/checkpoint.pth \
+  --output logs/detection/peod_rgbdvs_rvt_histogram_stage2_100ep
+```
+
+### GPU5：RGB-DVS Binary
+
+```bash
+cd /home/zhaowenyao24/Conda_prj/Detection_DVS/HWAware_HMNet_Det_PEOD_RGBDVS_v1.2_T_Binary
+CUDA_VISIBLE_DEVICES=5 CUBLAS_WORKSPACE_CONFIG=:4096:8 \
+./scripts/hmnet-python scripts/task_temporal.py train \
+  --modality rgbdvs --representation polarity_binary \
+  --data-root /data/lab_dataset/RGB_DVS_Fusion/PEOD_orig/preprocessed/hmnet_v12t_240x304_v1 \
+  --device cuda:0 --epochs 100 --batch 128 --workers 2 --eval-batch 32 \
+  --seed 42 --precision bf16 \
+  --learning-rate 5e-5 --min-learning-rate 2e-6 \
+  --warmup-epochs 2 --warmup-start-factor 0.04 \
+  --start-new-stage --resume logs/detection/peod_rgbdvs_polarity_binary/checkpoint.pth \
+  --output logs/detection/peod_rgbdvs_polarity_binary_stage2_100ep
+```
+
+
+再次恢复stage2时，重复同组命令，保持全部参数和输出目录，仅把 `--resume` 改为stage2输出目录内的 `checkpoint.pth`。可以保留 `--start-new-stage`；已有stage_parent时按普通恢复处理，不再清零局部step或重启LR。两阶段的TensorBoard、metrics、settings、checkpoint和best均独立保存；stage2累计轮数需加父阶段100轮。
