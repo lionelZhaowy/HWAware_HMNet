@@ -8,7 +8,7 @@ from hmnet.models.efficientvit_tasks import ROOT
 
 def main():
     p=argparse.ArgumentParser();p.add_argument('--data-root',required=True);p.add_argument('--output',required=True)
-    p.add_argument('--batches',default='32,64,96,128');p.add_argument('--workers',default='2');p.add_argument('--steps',type=int,default=4)
+    p.add_argument('--batches',default='2,4,8');p.add_argument('--workers',default='2');p.add_argument('--steps',type=int,default=4)
     p.add_argument('--modality',default='rgbdvs');p.add_argument('--representation',default='rvt_histogram')
     p.add_argument('--warmup',type=int,default=1);p.add_argument('--gpu',type=int,required=True);a=p.parse_args()
     out=Path(a.output);out.mkdir(parents=True,exist_ok=True);reports=[]
@@ -41,7 +41,7 @@ def main():
                     peak_allocated_mib=max(v['peak_memory_mib'] for v in values),peak_reserved_mib=max(v['peak_reserved_mib'] for v in values),
                     gpu_elapsed_ms_mean=float(np.mean([v.get('gpu_elapsed_ms',float('nan')) for v in values])),
                     gpu_util_mean=float(np.mean([r['gpu_util'] for r in resources])),gpu_util_range=[min(r['gpu_util'] for r in resources),max(r['gpu_util'] for r in resources)],
-                    steady_criterion=len(values)>=100 and seconds>=120,cache_scope='see data manifest; pilot is NOT full-training I/O evidence')
+                    steady_criterion=sum(v.get("microbatches",1) for v in values)>=100 and seconds>=120,cache_scope='see data manifest; pilot is NOT full-training I/O evidence')
                 # Checkpoint save is exercised, then remove only this disposable benchmark's large file.
                 (dest/'checkpoint.pth').unlink()
             reports.append(report);(out/'report.json').write_text(json.dumps(reports,indent=2));print(json.dumps(report),flush=True)
