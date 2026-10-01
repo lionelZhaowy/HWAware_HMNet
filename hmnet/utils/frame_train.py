@@ -154,6 +154,8 @@ def resolve_training_updates(config, batches_per_epoch):
     epochs = getattr(config, "epochs", None)
     if type(epochs) is not int or epochs <= 0:
         raise ValueError("epochs must be a positive integer when updates is None")
+    if getattr(config, "epoch_accumulation", False):
+        return epochs * math.ceil(batches_per_epoch / config.accumulation)
     # Accumulation continues across data epochs. The last update may consume up
     # to accumulation-1 extra batches; skipped/overflowed batches do not count.
     return (batches_per_epoch * epochs + config.accumulation - 1) // config.accumulation
@@ -169,6 +171,8 @@ def training_schedule(config, batches_per_epoch, max_updates):
     warmup = math.ceil(
         batches_per_epoch * getattr(config, "warmup_epochs", 0) / config.accumulation
     )
+    if getattr(config, "epoch_accumulation", False):
+        warmup = math.ceil(math.ceil(batches_per_epoch / config.accumulation) * getattr(config, "warmup_epochs", 0))
     factor = float(getattr(config, "warmup_start_factor", 0.1))
     if base <= 0 or not 0 <= minimum <= base or not 0 < factor <= 1:
         raise ValueError("Invalid learning rate, minimum or warmup_start_factor")
@@ -213,6 +217,15 @@ def run(config, args):
         runtime.close()
 
 
+def validate_resume_contract(previous, contract, new_stage=False):
+    if previous.get("fusion_mode") != contract["fusion_mode"]:
+        raise ValueError("Resume fusion architecture differs; start a new experiment")
+    expected = {k: v for k, v in contract.items() if not new_stage or k != "schedule"}
+    actual = {k: v for k, v in previous.items() if not new_stage or k != "schedule"}
+    if actual != expected:
+        raise ValueError("Resume training contract differs (precision/world size/BN/data/batch/seed/LR); start a separate experiment")
+
+
 def _run(config, args, runtime):
     precision = getattr(args, "precision", None) or ("fp16" if args.amp else getattr(config, "precision", "fp32"))
     if getattr(args, "precision", None) == "fp32" and args.amp:
@@ -232,14 +245,17 @@ def _run(config, args, runtime):
     output.mkdir(parents=True, exist_ok=True)
     tensorboard_dir = output / "tensorboard"
     has_run = ((output / "checkpoint.pth").exists()
-               or (output / "metrics.jsonl").exists() or tensorboard_dir.exists())
+               or (output / "metrics.jsonl").exists() or tensorboard_dir.exists() or (output / "settings.json").exists())
     if has_run and not config.resume and not args.overwrite:
         raise FileExistsError(f"{output}: use --output, --resume, or --overwrite")
     dataset = config.get_dataset()
     generator = torch.Generator()
     temporal = bool(getattr(config, "temporal_window", 0))
     sequential = temporal or getattr(config, "sequential_sampling", False)
-    if temporal and config.accumulation != 1:
+    epoch_accumulation = getattr(config, "epoch_accumulation", False)
+    if epoch_accumulation and (config.task != "detection" or runtime.distributed):
+        raise ValueError("Epoch accumulation is validated for single-GPU PEOD detection")
+    if temporal and config.accumulation != 1 and not epoch_accumulation:
         raise ValueError("Temporal first experiment requires accumulation=1")
     sampler = (SequenceBatchSampler(dataset, config.batch_size, runtime.rank,
                                    runtime.world_size, training=True, seed=args.seed)
@@ -250,6 +266,7 @@ def _run(config, args, runtime):
     loader = DataLoader(
         dataset, batch_sampler=sampler, num_workers=workers,
         **({"prefetch_factor": getattr(config, "prefetch_factor", 1)} if workers else {}),
+        **({"multiprocessing_context": "spawn"} if workers and epoch_accumulation else {}),
         generator=generator, collate_fn=getattr(dataset, "collate_fn", collate_keep_dict), pin_memory=True,
         persistent_workers=workers > 0 and not hasattr(dataset, "set_epoch"),
     )
@@ -279,6 +296,8 @@ def _run(config, args, runtime):
     if sequential:
         contract["sampling"] = dict(kind="balanced_sequence_lanes_v1", seed=args.seed,
             reset_gap_us=dataset.reset_gap_us, manifest_sha256=manifest_signature(dataset))
+    if epoch_accumulation:
+        contract["accumulation_policy"] = "flush_each_epoch_sample_weighted_v1; detached_state_each_microbatch; checkpoint_at_optimizer_boundary"
     if hasattr(config, "peod_contract"):
         contract["peod"] = config.peod_contract
     if temporal:
@@ -288,6 +307,12 @@ def _run(config, args, runtime):
     if runtime.primary:
         print(json.dumps(dict(training_contract=contract, batches_per_epoch=len(loader),
                               resolved_updates=max_updates, local_batch=config.batch_size // runtime.world_size)), flush=True)
+    # Reject incompatible resumes before model/GPU/optimizer construction.
+    resume_checkpoint = None
+    if config.resume:
+        resume_checkpoint = torch.load(config.resume, map_location="cpu", weights_only=False)
+        new_stage = getattr(config, "start_new_stage", False) and not resume_checkpoint.get("stage_parent")
+        validate_resume_contract(dict(resume_checkpoint.get("training_contract", {})), contract, new_stage)
     raw_model = config.get_model().to(runtime.device)
     if raw_model.backbone.fusion_mode != fusion_mode:
         raise ValueError("Config fusion mode and instantiated backbone disagree")
@@ -310,15 +335,11 @@ def _run(config, args, runtime):
     if getattr(config, "start_new_stage", False) and not config.resume:
         raise ValueError("A new training stage requires --resume with a full checkpoint")
     if config.resume:
-        ckpt = torch.load(config.resume, map_location="cpu", weights_only=False)
+        ckpt = resume_checkpoint
+        resume_checkpoint = None
         previous = dict(ckpt.get("training_contract", {}))
-        if previous.get("fusion_mode") != contract["fusion_mode"]:
-            raise ValueError("Resume fusion architecture differs; start a new experiment")
         new_stage = getattr(config, "start_new_stage", False) and not ckpt.get("stage_parent")
-        expected = {k: v for k, v in contract.items() if not new_stage or k != "schedule"}
-        actual = {k: v for k, v in previous.items() if not new_stage or k != "schedule"}
-        if actual != expected:
-            raise ValueError("Resume training contract differs (precision/world size/BN/data/batch/seed/LR); start a separate experiment")
+        validate_resume_contract(previous, contract, new_stage)
         if new_stage:
             if output.resolve() == Path(config.resume).resolve().parent or has_run:
                 raise ValueError("A new stage requires a separate, empty output directory")
@@ -412,7 +433,16 @@ def _run(config, args, runtime):
             gpu_start = torch.cuda.Event(enable_timing=True)
             gpu_end = torch.cuda.Event(enable_timing=True)
             component_sums = defaultdict(float)
-            while accepted < config.accumulation:
+            # Never carry a partial PEOD accumulation group into another epoch.
+            # A short final batch/group is weighted by its actual sample count.
+            group_microbatches = config.accumulation
+            group_samples = config.batch_size * group_microbatches
+            if epoch_accumulation:
+                position = 0 if cursor >= len(loader) else cursor
+                group_microbatches = min(group_microbatches, len(loader) - position)
+                group_samples = min(group_microbatches * config.batch_size,
+                                    len(dataset) - position * config.batch_size)
+            while accepted < group_microbatches:
                 data_started = time.perf_counter()
                 batch, epoch, cursor = next(iterator)
                 data_wait += time.perf_counter() - data_started
@@ -445,10 +475,13 @@ def _run(config, args, runtime):
                     continue
                 if not runtime.all_true(bool(torch.isfinite(loss))):
                     raise FloatingPointError(f"Non-finite {precision} loss at update {step}")
-                scaler.scale(loss * weight / config.accumulation).backward()
-                loss_sum += float(loss.detach()) * weight
+                loss_scale = (result["num_samples"] / group_samples if epoch_accumulation
+                              else 1 / config.accumulation)
+                scaler.scale(loss * weight * loss_scale).backward()
+                metric_weight = result["num_samples"] if epoch_accumulation else 1
+                loss_sum += float(loss.detach()) * weight * metric_weight
                 for name, value in result.get("log_vars", {}).items():
-                    component_sums[name] += float(value) * weight
+                    component_sums[name] += float(value) * weight * metric_weight
                 samples += result["num_samples"]
                 accepted += 1
             scaler.unscale_(optimizer)
@@ -470,20 +503,22 @@ def _run(config, args, runtime):
             seconds = runtime.reduce([time.perf_counter()-started], dist.ReduceOp.MAX)[0]
             names = sorted(component_sums)
             sums = runtime.reduce([loss_sum, samples] + [component_sums[name] for name in names])
+            metric_denominator = samples if epoch_accumulation else accepted
             record = dict(
                 wall_time=time.time(), gpu_elapsed_ms=gpu_start.elapsed_time(gpu_end),
                 data_wait_seconds=data_wait, peak_reserved_mib=torch.cuda.max_memory_reserved()/2**20,
                 step=step, epoch=epoch+1, data_epochs=epoch+cursor/len(loader),
-                stage_epochs=step*config.accumulation/len(loader),
-                loss=sums[0]/runtime.world_size/accepted, seconds=seconds,
+                stage_epochs=(epoch+cursor/len(loader) if epoch_accumulation else step*config.accumulation/len(loader)),
+                microbatches=accepted,
+                loss=sums[0]/runtime.world_size/metric_denominator, seconds=seconds,
                 lr=lr, learning_rates=[group["lr"] for group in optimizer.param_groups],
-                loss_components={name: value/runtime.world_size/accepted for name, value in zip(names, sums[2:])},
+                loss_components={name: value/runtime.world_size/metric_denominator for name, value in zip(names, sums[2:])},
                 amp_scale=scaler.get_scale(), amp_skipped_updates=amp_skipped_updates,
                 samples_per_second=sums[1]/seconds, samples=int(sums[1]),
                 peak_memory_mib=runtime.reduce([torch.cuda.max_memory_allocated()/2**20], dist.ReduceOp.MAX)[0],
             )
             is_best = False
-            if validation is not None and (step == 1 or step % eval_interval == 0 or step == max_updates):
+            if validation is not None and ((not epoch_accumulation and step == 1) or step % eval_interval == 0 or step == max_updates):
                 record["dev"] = config.evaluate_validation(raw_model, validation) if hasattr(config, "evaluate_validation") else evaluate_seg(
                     raw_model, validation, getattr(config, "eval_batch_size", config.batch_size),
                     workers=config.workers, prefetch_factor=getattr(config, "prefetch_factor", 1), runtime=runtime)
