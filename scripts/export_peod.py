@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export PEOD RGB/DVS/fusion at 240x304, retaining explicit FP32 DVS memory."""
+"""Export PEOD RGB/DVS/fusion at native 720x1280, retaining explicit FP32 DVS memory."""
 import argparse,json,subprocess
 from pathlib import Path
 import numpy as np
@@ -32,7 +32,10 @@ def main():
     if c['event_data']['kind']!='peod':raise ValueError('PEOD checkpoint required')
     modality=c['modality'];rep=c['event_input']['representation'];window=c.get('temporal',{}).get('window',0)
     data=PEODFrames(a.data_root,'train','rvt_histogram' if modality=='rgb' else rep,modality,limit=3)
-    if data.manifest['geometry']!=c['event_data']['geometry']:raise ValueError('Export geometry differs')
+    if (data.manifest['geometry']!=c['event_data']['geometry'] or data.input_spec!=c['event_input']
+            or data.data_contract['manifest_sha256']!=c['event_data']['manifest_sha256']
+            or data.data_contract['source_signature']!=c['event_data']['source_signature']):
+        raise ValueError('Export data/input/geometry contract differs')
     model=build_frame_task('detection',modality=modality,temporal_window=window,
         event_channels=20 if modality=='rgb' else c['event_input']['channels'],num_classes=6).eval()
     model.load_state_dict(saved['state_dict'],strict=True);wrapper=Graph(model,a.backbone_only).eval()
@@ -65,7 +68,8 @@ def main():
         input_shapes={n:list(x.shape) for n,x in zip(inputs,(*frames[0],*states))},output_shapes={n:list(x.shape) for n,x in zip(outputs,want)},
         modality=modality,temporal_window=window,state_feedback='independent_PyTorch_ORT_trajectories',precision='CPU_FP32',
         weights=dict(path=str(Path(a.checkpoint).resolve()),sha256=sha_file(a.checkpoint),step=saved['step'],source='bounded_smoke_official_B1_initialization'),
-        code_commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
+        code_commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),
+        code_worktree_dirty=bool(subprocess.check_output(['git','status','--porcelain'],cwd=ROOT,text=True)),
         source_sha256={str(p.relative_to(ROOT)):sha_file(p) for base in ('hmnet','scripts') for p in (ROOT/base).rglob('*.py')},
         nodes=len(graph.graph.node),batch_normalization_nodes=sum(n.op_type=='BatchNormalization' for n in graph.graph.node))
     path.with_suffix('.report.json').write_text(json.dumps(report,indent=2));print(path,report['numerical_passed'],flush=True)

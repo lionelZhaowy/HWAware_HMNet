@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Real GPU continuous versus interrupted PEOD training; exact recursive comparison."""
+"""当前独立工程真实GPU连续/保存恢复精确对照；包括epoch尾累积组。"""
 import argparse,json,subprocess,os
 from pathlib import Path
 import numpy as np
 import torch
 from hmnet.models.efficientvit_tasks import ROOT
+from scripts.peod import parser
 
 def equal(a,b,path='root'):
     if torch.is_tensor(a):
@@ -20,22 +21,34 @@ def equal(a,b,path='root'):
     elif a!=b:raise AssertionError(path+f' {a} != {b}')
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--data-root',required=True);p.add_argument('--output',default='artifacts/peod/resume');p.add_argument('--batch',type=int,default=2);p.add_argument('--workers',type=int,default=0);a=p.parse_args()
-    out=Path(a.output);out.mkdir(parents=True,exist_ok=True);reports=[]
-    for name,mod,rep in [('rgb','rgb','rvt_histogram'),('dvs','dvs','rvt_histogram'),('fusion','rgbdvs','rvt_histogram'),('binary','rgbdvs','polarity_binary')]:
-        for mode,steps,resume in [('continuous',4,False),('split',2,False),('split',4,True)]:
-            dest=out/(name+'_'+mode)
-            command=[str(ROOT/'scripts/hmnet-python'),str(ROOT/'scripts/task_temporal.py'),'train','--modality',mod,'--representation',rep,
-                '--data-root',a.data_root,'--batch',str(a.batch),'--workers',str(a.workers),'--stop-after',str(steps),'--output',str(dest)]
-            if resume:command+=['--resume',str(dest/'checkpoint.pth')]
-            with (out/f'{name}_{mode}_{steps}.log').open('w') as f:subprocess.run(command,check=True,stdout=f,stderr=subprocess.STDOUT)
-        x=torch.load(out/(name+'_continuous/checkpoint.pth'),map_location='cpu',weights_only=False)
-        y=torch.load(out/(name+'_split/checkpoint.pth'),map_location='cpu',weights_only=False)
-        equal(x,y); reports.append(dict(model=name,exact_resume=True,compared=list(x),step=x['step']))
-        (out/'report.json').write_text(json.dumps(reports,indent=2));print(name,'exact resume PASS',flush=True)
-        # Redundant continuous optimizer snapshot is rebuildable and already checked.
-        (out/(name+'_continuous/checkpoint.pth')).unlink()
-        del x,y
-    print(out/'report.json')
-
+    defaults=parser().parse_args(['train'])
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--data-root',default=defaults.data_root);p.add_argument('--output',required=True)
+    p.add_argument('--batch',type=int,default=defaults.batch);p.add_argument('--workers',type=int,default=defaults.workers)
+    p.add_argument('--accumulation',type=int,default=defaults.accumulation);p.add_argument('--tail-check',action='store_true');a=p.parse_args()
+    out=Path(a.output);out.mkdir(parents=True,exist_ok=True)
+    # 67 samples produces 9 batches at batch8: 4+4+1 microbatches, final batch3.
+    limit=67 if a.tail_check else 0;steps=6 if a.tail_check else 4
+    commands=[]
+    for mode,end,resume in [('continuous',steps,False),('split',2,False),('split',steps,True)]:
+        dest=out/mode
+        command=[str(ROOT/'scripts/hmnet-python'),str(ROOT/'scripts/peod.py'),'train','--data-root',a.data_root,
+            '--batch',str(a.batch),'--workers',str(a.workers),'--accumulation',str(a.accumulation),'--limit',str(limit),
+            '--stop-after',str(end),'--output',str(dest)]
+        if resume:command+=['--resume',str(dest/'checkpoint.pth')]
+        with (out/f'{mode}_{end}.log').open('w') as f:
+            completed=subprocess.run(command,stdout=f,stderr=subprocess.STDOUT)
+        commands.append(dict(command=command,exit_code=completed.returncode))
+        if completed.returncode:raise RuntimeError(f'{mode}/{end} failed; see log')
+    x=torch.load(out/'continuous/checkpoint.pth',map_location='cpu',weights_only=False)
+    y=torch.load(out/'split/checkpoint.pth',map_location='cpu',weights_only=False);equal(x,y)
+    rows=[json.loads(line) for line in (out/'continuous/metrics.jsonl').read_text().splitlines()]
+    report=dict(exact_resume=True,compared=list(x),step=x['step'],data_epoch=x['data_epoch'],data_cursor=x['data_cursor'],
+        tail_check=a.tail_check,samples=[r['samples'] for r in rows],microbatches=[r['microbatches'] for r in rows],
+        contract=x['training_contract'],commands=commands,
+        pending_gradients='none: all checkpoints are optimizer-boundary; partial group flushed at epoch end')
+    if a.tail_check:
+        assert report['samples']==[32,32,3,32,32,3];assert report['microbatches']==[4,4,1,4,4,1]
+        assert sum(report['samples'])==134 and report['data_epoch']==1 and report['data_cursor']==9
+    (out/'report.json').write_text(json.dumps(report,indent=2));print(json.dumps(dict(exact_resume=True,tail_check=a.tail_check,step=x['step'])))
+    (out/'continuous/checkpoint.pth').unlink()
 if __name__=='__main__':main()
