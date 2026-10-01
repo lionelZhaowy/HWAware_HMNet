@@ -82,6 +82,6 @@ CUDA_VISIBLE_DEVICES=3 ./scripts/hmnet-python scripts/peod.py eval --split val \
 # 骨干图另加--backbone-only；严格超差会保留报告并exit2。
 ```
 
-本轮372个真实原始输入核验、四组高目标更新、完整val理想预测、共有初始化、4步严格恢复及67帧尾组恢复已验证。四组整网/骨干ONNX和逐案例报告位于`artifacts/peod_720p/onnx/`；RGB-only严格数值通过，含DVS三组仍有超差，部署未验收。权重来源为官方初始化后的4步真实冒烟，非正式权重。CPU FP32容差沿用atol=1e-3、rtol=1e-4；真实连续反馈、全零、重置和融合空事件均保留。
+本轮372个真实原始输入核验、四组高目标更新、完整val理想预测、共有初始化、4步严格恢复及67帧尾组恢复已验证。四组整网/骨干ONNX和逐案例报告位于`artifacts/peod_720p/onnx/`；RGB-only整网严格数值通过，其骨干real_sequence/2的f16仍超差；含DVS三组整网与骨干均有超差，部署未验收。权重来源为官方初始化后的4步真实冒烟，非正式权重。CPU FP32容差沿用atol=1e-3、rtol=1e-4；真实连续反馈、全零、重置和融合空事件均保留。
 
 本服务器的集中证据与结构图：`/home/zhaowenyao24/Conda_prj/Detection_DVS/HWAware_HMNet/artifacts/peod_detection/native_720p/README.md`。正式训练及泛化精度尚未完成。
