@@ -1,3 +1,19 @@
 dataset = "peod"
 modality = "rgbdvs"
 representation = "rvt_histogram"
+
+# 四组共同原生训练日程；从官方 B1 初始化，不进入旧 stage2。
+epochs = 200
+batch = 8
+eval_batch = 8
+workers = 2
+learning_rate = 0.0001
+accumulation = 4
+seed = 42
+precision = "bf16"
+min_learning_rate = 0.000002
+warmup_epochs = 5.0
+warmup_start_factor = 0.1
+weight_decay = 0.01
+prefetch_factor = 1
+eval_every_epochs = 1

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Four PEOD experiments with a shared training and original-coordinate COCO protocol."""
+import os
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 import argparse
 import json
 from pathlib import Path
@@ -24,76 +26,40 @@ def parser():
     p.add_argument('--dataset',choices=['peod'],default='peod')
     p.add_argument('--modality',choices=['rgb','dvs','rgbdvs'],default=defaults.get('modality','rgbdvs'))
     p.add_argument('--representation',choices=['rvt_histogram','polarity_binary'],default=defaults['representation'])
-    p.add_argument('--data-root',default='/data/lab_dataset/RGB_DVS_Fusion/PEOD_orig/preprocessed/hmnet_v12t_240x304_v1')
+    p.add_argument('--data-root',default='/data/lab_dataset/RGB_DVS_Fusion/PEOD_orig/preprocessed/hmnet_v12t_720x1280_v1')
     p.add_argument('--output');p.add_argument('--resume');p.add_argument('--checkpoint');p.add_argument('--split',default='val')
-    p.add_argument('--epochs',type=int,default=100);p.add_argument('--batch',type=int,default=32)
-    p.add_argument('--eval-batch',type=int,default=32);p.add_argument('--workers',type=int,default=2)
-    p.add_argument('--seed',type=int,default=42);p.add_argument('--limit',type=int,default=0);p.add_argument('--stop-after',type=int)
-    p.add_argument('--precision',choices=['bf16','fp32'],default='bf16');p.add_argument('--device',default='cuda:0')
-    p.add_argument('--start-new-stage',action='store_true',help='Start a separate stage from a completed stage1 checkpoint; preserve optimizer/RNG/data cursor')
-    p.add_argument('--learning-rate',type=float,default=2e-4)
-    p.add_argument('--min-learning-rate',type=float,default=2e-6)
-    p.add_argument('--warmup-epochs',type=float,default=5.)
-    p.add_argument('--warmup-start-factor',type=float,default=.1)
+    p.add_argument('--epochs',type=int,default=defaults['epochs']);p.add_argument('--batch',type=int,default=defaults['batch'])
+    p.add_argument('--eval-batch',type=int,default=defaults['eval_batch']);p.add_argument('--workers',type=int,default=defaults['workers'])
+    p.add_argument('--seed',type=int,default=defaults['seed']);p.add_argument('--limit',type=int,default=0);p.add_argument('--stop-after',type=int)
+    p.add_argument('--precision',choices=['bf16','fp32'],default=defaults['precision']);p.add_argument('--device',default='cuda:0')
+    p.add_argument('--learning-rate',type=float,default=defaults['learning_rate'])
+    p.add_argument('--min-learning-rate',type=float,default=defaults['min_learning_rate'])
+    p.add_argument('--warmup-epochs',type=float,default=defaults['warmup_epochs'])
+    p.add_argument('--warmup-start-factor',type=float,default=defaults['warmup_start_factor'])
+    p.add_argument('--accumulation',type=int,default=defaults['accumulation'])
     p.add_argument('--dump',help='JSONL predictions in original 1280x720 coordinates; scored without rerunning inference')
     return p
 
 
-def validate_stage_start(a):
-    if not a.start_new_stage and not (a.action=='train' and a.resume):
-        return
-    if a.start_new_stage and (a.action!='train' or not a.resume or not a.output):
-        raise ValueError('--start-new-stage requires train, --resume and explicit --output')
-    source=Path(a.resume).resolve()
-    saved=torch.load(source,map_location='cpu',weights_only=False)
-    # Reopening a stage2 checkpoint is an ordinary strict resume, not another reset.
-    if saved.get('stage_parent'):
-        if not a.output:
-            raise ValueError('Stage2 resume requires an explicit stage2 --output')
-        destination=Path(a.output).resolve()
-        parent=Path(saved['stage_parent']['checkpoint']).resolve().parent
-        if destination==parent or parent in destination.parents:
-            raise ValueError('Stage2 resume must not overwrite the stage1 output directory')
-        return
-    if not a.start_new_stage:
-        return
-    destination=Path(a.output).resolve()
-    contract=saved.get('training_contract',{})
-    if contract.get('event_data',{}).get('kind')!='peod':
-        raise ValueError('A PEOD stage1 checkpoint is required')
-    if destination==source.parent or source.parent in destination.parents:
-        raise ValueError('Stage2 output must be outside the stage1 output directory')
-    if destination.exists() and any(destination.iterdir()):
-        raise ValueError('Stage2 requires a new, empty output directory')
-    total=contract['schedule']['total_updates']
-    if total<=0 or saved['step']!=total:
-        raise ValueError(f'Stage1 is not complete: checkpoint step={saved["step"]}, required={total}; wait for its final checkpoint')
-    if not a.stop_after:
-        batches=(contract['train_samples']+contract['batch_size']-1)//contract['batch_size']
-        expected=(100*batches+contract['accumulation']-1)//contract['accumulation']
-        if contract['event_data']['diagnostic_subset'] or total!=expected:
-            raise ValueError('Formal stage2 requires a full-data, completed 100-epoch stage1')
-
-
 def configuration(a):
-    validate_stage_start(a)
+    defaults=tomllib.loads((ROOT/'experiments/task_temporal/experiment.toml').read_text())
     temporal=0 if a.modality=='rgb' else 2
-    name=f'peod_{a.modality}_{"none" if a.modality=="rgb" else a.representation}'
+    name=f'peod_720p_{a.modality}_{"none" if a.modality=="rgb" else a.representation}'
     pretrained=ROOT/'pretrained/efficientvit_b1_r224.pth'
     c=SimpleNamespace(task='detection',dataset='peod',modality=a.modality,event_representation=a.representation,
         event_channels=0 if a.modality=='rgb' else (20 if a.representation=='rvt_histogram' else 2),
         temporal_window=temporal,sequential_sampling=True,fusion_mode='add',data_root=a.data_root,
         deterministic=True,epochs=a.epochs,updates=None,batch_size=a.batch,eval_batch_size=a.eval_batch,
-        accumulation=1,workers=a.workers,prefetch_factor=1,learning_rate=a.learning_rate,weight_decay=.01,
+        accumulation=a.accumulation,epoch_accumulation=True,workers=a.workers,prefetch_factor=defaults['prefetch_factor'],learning_rate=a.learning_rate,weight_decay=defaults['weight_decay'],
         precision=a.precision,lr_schedule='warmup_cosine',min_learning_rate=a.min_learning_rate,warmup_epochs=a.warmup_epochs,
-        warmup_start_factor=a.warmup_start_factor,eval_every_epochs=1,resume=a.resume or '',start_new_stage=a.start_new_stage,output=a.output or str(ROOT/'logs/detection'/name))
+        warmup_start_factor=a.warmup_start_factor,eval_every_epochs=defaults['eval_every_epochs'],resume=a.resume or '',start_new_stage=False,output=a.output or str(ROOT/'logs/detection'/name))
     c.initialization_contract=dict(official_b1_sha256=sha_file(pretrained),method='named_component_sha256_seed_v1',seed=a.seed,
         binary_stem='official_RGB_mean_times_3_over_2',init_from=None)
     c.peod_contract=dict(classes=['car','person','bus','truck','2-wheeler','3-wheeler'],workers=a.workers,
-        prefetch_factor=1,persistent_workers=a.workers>0,pin_memory=True,eval_batch=a.eval_batch,
+        prefetch_factor=1,persistent_workers=a.workers>0,pin_memory=True,multiprocessing_context='spawn',eval_batch=a.eval_batch,
         eval_precision=a.precision,score_threshold=.01,nms_iou=.65,gradient_clip=None,
         validation='every_epoch_COCO_mAP',main_checkpoint='last_epoch',best_checkpoint='val_mAP_separate',
-        geometry='1280x720_to_304x171_pad_top34_bottom35',rgb='ImageNet_normalization',augmentation='lane_consistent_horizontal_flip',
+        geometry='native_720x1280_no_external_padding_same_conv_ceil_features',rgb='ImageNet_normalization',augmentation='lane_consistent_horizontal_flip',
         optimizer='AdamW_default_betas_eps',evaluation='original_float_COCO_all_frames_no_GEN1_filter')
     c.get_model=lambda:build_frame_task('detection',str(pretrained),modality=a.modality,temporal_window=temporal,
             event_channels=c.event_channels if temporal else 20,num_classes=6,stable_seed=a.seed)
@@ -120,10 +86,13 @@ def score_dump(rows,classes):
     else:
         det=COCO();det.dataset=dict(images=images,annotations=[],categories=categories);det.createIndex()
     ev=COCOeval(coco,det,'bbox');ev.evaluate();ev.accumulate();ev.summarize()
-    metrics=dict(mAP=float(ev.stats[0]),AP50=float(ev.stats[1]),AP75=float(ev.stats[2]),classes={})
+    metrics=dict(mAP=float(ev.stats[0]),AP50=float(ev.stats[1]),AP75=float(ev.stats[2]),
+        AP_small=float(ev.stats[3]),AP_medium=float(ev.stats[4]),AP_large=float(ev.stats[5]),classes={},class_support={})
     for i,name in enumerate(classes):
         values=ev.eval['precision'][:,:,i,0,-1];values=values[values>=0]
         metrics['classes'][name]=float(values.mean()) if len(values) else None
+        metrics['class_support'][name]=dict(gt=sum(a['category_id']==i for r in rows for a in r['gt']),
+            sequences=len({r.get('sequence',r['index'] if 'index' in r else 0) for r in rows if any(a['category_id']==i for a in r['gt'])}))
     return metrics
 
 
@@ -132,7 +101,7 @@ def score_model(model,data,batch,workers,precision,dump=None):
     model.eval();device=next(model.parameters()).device
     sampler=SequenceBatchSampler(data,batch,training=False)
     loader=DataLoader(data,batch_sampler=sampler,collate_fn=data.collate_fn,num_workers=workers,
-        pin_memory=True,**(dict(prefetch_factor=1) if workers else {}))
+        pin_memory=True,**(dict(prefetch_factor=1,multiprocessing_context="spawn") if workers else {}))
     streams=TemporalStreams(model.backbone,batch,data.reset_gap_us) if model.backbone.temporal_window else None
     rows=[]
     for packed in loader:
@@ -144,7 +113,6 @@ def score_model(model,data,batch,workers,precision,dump=None):
         for pred,meta in zip(predictions,metas):
             index=meta['sample_index'];s=data.samples[index];boxes=pred['bboxes'].float().cpu().numpy().copy()
             if len(boxes):
-                boxes[:,[1,3]]-=34;boxes/=.2375
                 boxes[:,[0,2]]=boxes[:,[0,2]].clip(0,1280);boxes[:,[1,3]]=boxes[:,[1,3]].clip(0,720)
             preds=[]
             for b,score,label in zip(boxes,pred['scores'].float().cpu().tolist(),pred['labels'].cpu().tolist()):
