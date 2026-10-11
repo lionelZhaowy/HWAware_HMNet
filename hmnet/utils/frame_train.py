@@ -19,6 +19,8 @@ from hmnet.dataset.custom_collate_fn import collate_keep_dict
 from hmnet.utils.common import fix_seed
 from hmnet.dataset.temporal_frames import SequenceBatchSampler, manifest_signature
 from hmnet.utils.temporal_streams import TemporalStreams
+from hmnet.utils.model_ema import ModelEMA
+from hmnet.utils.recipe_checkpoints import atomic_save, inference_checkpoint
 
 
 def unpack(batch, task):
@@ -108,12 +110,16 @@ def write_tensorboard(writer, record):
         writer.add_scalar(f"train/loss_components/{tag}", loss, step)
     for key in ("seconds", "samples_per_second", "peak_memory_mib"):
         writer.add_scalar(f"performance/{key}", record[key], step)
-    for split in ("dev", "fixed_train"):
+    for split in ("dev", "dev_ema", "fixed_val", "fixed_val_ema", "fixed_train"):
         if split not in record:
             continue
         if "mAP" in record[split]:
-            for metric in ("mAP", "AP50", "AP75"):
-                writer.add_scalar(f"{split}/{metric}", record[split][metric], step)
+            for metric in ("mAP", "AP50", "AP75", "AP_small", "AP_medium", "AP_large"):
+                if metric in record[split]:writer.add_scalar(f"{split}/{metric}", record[split][metric], step)
+            for name,value in record[split].get("classes",{}).items():
+                if value is not None:writer.add_scalar(f"{split}/AP_{name}",value,step)
+            for name,values in record[split].get("subsets",{}).items():
+                writer.add_scalar(f"{split}/condition_{name}_mAP",values["mAP"],step)
             continue
         writer.add_scalar(f"{split}/mIoU", record[split]["miou"], step)
         for class_id, iou in enumerate(record[split]["class_iou"]):
@@ -218,6 +224,8 @@ def run(config, args):
 
 
 def validate_resume_contract(previous, contract, new_stage=False):
+    if previous.get("peod", {}).get("precision_contract") != contract.get("peod", {}).get("precision_contract"):
+        raise ValueError("Resume PEOD target/geometry precision contract differs; initialize a new experiment")
     if previous.get("fusion_mode") != contract["fusion_mode"]:
         raise ValueError("Resume fusion architecture differs; start a new experiment")
     expected = {k: v for k, v in contract.items() if not new_stage or k != "schedule"}
@@ -300,6 +308,8 @@ def _run(config, args, runtime):
         contract["accumulation_policy"] = "flush_each_epoch_sample_weighted_v1; detached_state_each_microbatch; checkpoint_at_optimizer_boundary"
     if hasattr(config, "peod_contract"):
         contract["peod"] = config.peod_contract
+    if getattr(config, "ema_contract", None):
+        contract["ema"] = config.ema_contract
     if temporal:
         contract["temporal"] = dict(window=2, branch="dvs", state_dtype="float32",
             reduction_dtype="float32", tbptt=1, sampler="balanced_sequence_lanes_v1",
@@ -311,6 +321,8 @@ def _run(config, args, runtime):
     resume_checkpoint = None
     if config.resume:
         resume_checkpoint = torch.load(config.resume, map_location="cpu", weights_only=False)
+        if resume_checkpoint.get("inference_only"):
+            raise ValueError("Best/milestone weights are inference-only; resume checkpoint.pth")
         new_stage = getattr(config, "start_new_stage", False) and not resume_checkpoint.get("stage_parent")
         validate_resume_contract(dict(resume_checkpoint.get("training_contract", {})), contract, new_stage)
     raw_model = config.get_model().to(runtime.device)
@@ -329,6 +341,8 @@ def _run(config, args, runtime):
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate,
                                   weight_decay=config.weight_decay)
     scaler = torch.amp.GradScaler("cuda", enabled=precision == "fp16", init_scale=1024.0)
+    ema = ModelEMA(raw_model, config.ema_contract["decay"], config.ema_contract["tau"]) if getattr(config,"ema_contract",None) else None
+    best_ema_mAP, best_ema_step = -1.0, 0
     step, epoch, cursor = 0, 0, 0
     best_miou, best_step = -1.0, 0
     stage_parent = None
@@ -350,6 +364,11 @@ def _run(config, args, runtime):
         else:
             stage_parent = ckpt.get("stage_parent")
         raw_model.load_state_dict(ckpt["state_dict"], strict=True)
+        if ema is not None:
+            if "ema" not in ckpt:raise ValueError("Missing EMA resume state")
+            ema.load_state_dict(ckpt["ema"])
+            if ema.updates != ckpt["step"]:raise ValueError("EMA update counter differs from optimizer steps")
+            best_ema_mAP, best_ema_step = ckpt["best_ema_mAP"], ckpt["best_ema_step"]
         optimizer.load_state_dict(ckpt["optimizer"])
         scaler.load_state_dict(ckpt["scaler"])
         step, epoch, cursor = ckpt["step"], ckpt["data_epoch"], ckpt["data_cursor"]
@@ -366,6 +385,7 @@ def _run(config, args, runtime):
     if step >= max_updates:
         raise ValueError(f"Checkpoint already has {step} updates; target is {max_updates}")
     validation = config.get_validation_dataset() if hasattr(config, "get_validation_dataset") else None
+    reference_validation = config.get_reference_validation_dataset() if hasattr(config, "get_reference_validation_dataset") else None
     history = output / "metrics.jsonl"
     if runtime.primary:
         if config.resume and history.exists():
@@ -498,6 +518,7 @@ def _run(config, args, runtime):
             scaler.step(optimizer)
             scaler.update()
             step += 1
+            if ema is not None:ema.update(raw_model)
             gpu_end.record()
             torch.cuda.synchronize()
             seconds = runtime.reduce([time.perf_counter()-started], dist.ReduceOp.MAX)[0]
@@ -518,7 +539,10 @@ def _run(config, args, runtime):
                 peak_memory_mib=runtime.reduce([torch.cuda.max_memory_allocated()/2**20], dist.ReduceOp.MAX)[0],
             )
             is_best = False
+            is_best_ema = False
+            if ema is not None:record["ema_updates"] = ema.updates
             if validation is not None and ((not epoch_accumulation and step == 1) or step % eval_interval == 0 or step == max_updates):
+                validation_rng = runtime.gather_rng() if ema is not None else None
                 record["dev"] = config.evaluate_validation(raw_model, validation) if hasattr(config, "evaluate_validation") else evaluate_seg(
                     raw_model, validation, getattr(config, "eval_batch_size", config.batch_size),
                     workers=config.workers, prefetch_factor=getattr(config, "prefetch_factor", 1), runtime=runtime)
@@ -527,6 +551,16 @@ def _run(config, args, runtime):
                 if is_best:
                     best_miou, best_step = selection_metric, step
                 record.update(best_miou=best_miou, best_step=best_step)
+                if ema is not None:
+                    record["dev_ema"] = config.evaluate_validation(ema.model, validation)
+                    selection_ema = record["dev_ema"]["mAP"]
+                    is_best_ema = selection_ema > best_ema_mAP
+                    if is_best_ema:best_ema_mAP, best_ema_step = selection_ema, step
+                    record.update(best_ema_mAP=best_ema_mAP,best_ema_step=best_ema_step)
+                if reference_validation is not None and ((epoch+1) % config.reference_eval_every_epochs == 0 or step == max_updates):
+                    record["fixed_val"] = config.evaluate_validation(raw_model, reference_validation)
+                    if ema is not None:record["fixed_val_ema"] = config.evaluate_validation(ema.model, reference_validation)
+                if validation_rng is not None:runtime.restore_rng(validation_rng)
                 if getattr(config, "overfit", 0):
                     record["fixed_train"] = evaluate_seg(
                         raw_model, dataset, config.batch_size, workers=config.workers,
@@ -536,7 +570,7 @@ def _run(config, args, runtime):
                     f.write(json.dumps(record) + "\n")
                 write_tensorboard(writer, record)
                 print(json.dumps(record), flush=True)
-            if (is_best or step % eval_interval == 0 or step == max_updates
+            if (is_best or is_best_ema or step % eval_interval == 0 or step == max_updates
                     or (getattr(args, "stop_after", None) is not None and step >= args.stop_after)):
                 rng_by_rank = runtime.gather_rng()
                 temporal_by_rank = None
@@ -555,12 +589,21 @@ def _run(config, args, runtime):
                         data_epoch=epoch, data_cursor=cursor, rng_by_rank=rng_by_rank,
                         temporal_by_rank=temporal_by_rank,
                     )
-                    temp = output / "checkpoint.tmp.pth"
-                    torch.save(checkpoint, temp)
-                    temp.replace(output / "checkpoint.pth")
-                    if is_best:
-                        shutil.copyfile(output / "checkpoint.pth", output / "best_checkpoint.tmp.pth")
-                        (output / "best_checkpoint.tmp.pth").replace(output / "best_checkpoint.pth")
+                    if ema is not None:
+                        checkpoint.update(ema=ema.state_dict(),best_ema_mAP=best_ema_mAP,best_ema_step=best_ema_step)
+                        atomic_save(checkpoint, output / "checkpoint.pth")
+                        if is_best:atomic_save(inference_checkpoint(checkpoint),output / "best_checkpoint.pth")
+                        if is_best_ema:atomic_save(inference_checkpoint(checkpoint,ema=True),output / "best_ema_checkpoint.pth")
+                        if cursor == len(loader) and epoch+1 in config.checkpoint_milestones:
+                            atomic_save(inference_checkpoint(checkpoint),output / f"epoch_{epoch+1:03d}_raw.pth")
+                            atomic_save(inference_checkpoint(checkpoint,ema=True),output / f"epoch_{epoch+1:03d}_ema.pth")
+                    else:
+                        temp = output / "checkpoint.tmp.pth"
+                        torch.save(checkpoint, temp)
+                        temp.replace(output / "checkpoint.pth")
+                        if is_best:
+                            shutil.copyfile(output / "checkpoint.pth", output / "best_checkpoint.tmp.pth")
+                            (output / "best_checkpoint.tmp.pth").replace(output / "best_checkpoint.pth")
                     writer.flush()
                 runtime.barrier()
             # Optional bounded diagnostics stop without changing the LR budget.

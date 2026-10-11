@@ -269,16 +269,16 @@ class YOLOXHead(BlockBase):
             N = max([ len(lbl) for lbl in gt_labels ])
 
             if N == 0:
-                return torch.empty(B, N, 5)
+                return gt_bboxes[0].new_empty((B, N, 5), dtype=torch.float32)
 
-            dtype = gt_labels[0].dtype
+            dtype = torch.float32  # Class IDs share storage with continuous cx/cy/w/h.
             device = gt_labels[0].device
 
             targets = torch.zeros([B, N, 5], dtype=dtype, device=device)
 
             for i, (bbox, lbl) in enumerate(zip(gt_bboxes, gt_labels)):
                 # xyxy -> cxcywh
-                bbox = bbox.clone()
+                bbox = bbox.float().clone()
                 lbl = lbl.clone()
                 bbox[:,2] = bbox[:,2] - bbox[:,0]        # w
                 bbox[:,3] = bbox[:,3] - bbox[:,1]        # h
@@ -343,6 +343,13 @@ class YOLOXHead(BlockBase):
 
     @torch.jit.ignore
     def loss(self, outputs, gt_bboxes, gt_labels, ignore_masks, iou_only=False):
+        # Geometry, assignment and losses are FP32; casts retain gradients to BF16 convolutions.
+        with torch.amp.autocast(outputs[0][0].device.type, enabled=False):
+            outputs = tuple(tuple(x.float() for x in group) for group in outputs)
+            return self._loss_fp32(outputs, gt_bboxes, gt_labels, ignore_masks, iou_only)
+
+    @torch.jit.ignore
+    def _loss_fp32(self, outputs, gt_bboxes, gt_labels, ignore_masks, iou_only=False):
         reg_outputs, obj_outputs, cls_outputs = outputs
 
         if self.ignore_bboxes_as_negative:
@@ -420,6 +427,8 @@ class YOLOXHead(BlockBase):
         return output, grid
 
     def decode_outputs(self, outputs: Tensor, hw: List[Tuple[int,int]], dtype: torch.dtype) -> Tensor:
+        # Pixel-space grid arithmetic must not round native 720P coordinates in BF16.
+        outputs = outputs.float()
         grids = []
         strides = []
         for (hsize, wsize), stride in zip(hw, self.strides):
@@ -430,8 +439,8 @@ class YOLOXHead(BlockBase):
             #strides.append(torch.full((*shape, 1), stride))
             strides.append(torch.full((1, hsize*wsize, 1), stride, device=outputs.device))
 
-        grids = torch.cat(grids, dim=1).type(dtype)
-        strides = torch.cat(strides, dim=1).type(dtype)
+        grids = torch.cat(grids, dim=1).to(dtype=torch.float32)
+        strides = torch.cat(strides, dim=1).to(dtype=torch.float32)
 
         outputs[..., :2] = (outputs[..., :2] + grids) * strides
         outputs[..., 2:4] = torch.exp(outputs[..., 2:4]) * strides
@@ -697,7 +706,7 @@ class YOLOXHead(BlockBase):
 
         # (cx, cy, w, h) -> (x1, y1, x2, y2)
         gt_bboxes_xyxy = gt_bboxes_per_image.clone()
-        gt_bboxes_xyxy[:,:2] = gt_bboxes_per_image[:,:2] - (gt_bboxes_per_image[:,2:] * 0.5).long()
+        gt_bboxes_xyxy[:,:2] = gt_bboxes_per_image[:,:2] - (gt_bboxes_per_image[:,2:] * 0.5)
         gt_bboxes_xyxy[:,2:] = gt_bboxes_xyxy[:,:2] + gt_bboxes_per_image[:,2:]
         bboxes_preds_xyxy = bboxes_preds_per_image.clone()
         bboxes_preds_xyxy[:,:2] = bboxes_preds_per_image[:,:2] - (bboxes_preds_per_image[:,2:] * 0.5)
@@ -779,11 +788,11 @@ class YOLOXHead(BlockBase):
             .repeat(num_gt, 1)
         )
 
-        gt_bboxes_per_image_l = gt_bboxes_per_image[:, 0] - (0.5 * gt_bboxes_per_image[:, 2]).long()
+        gt_bboxes_per_image_l = gt_bboxes_per_image[:, 0] - (0.5 * gt_bboxes_per_image[:, 2])
         gt_bboxes_per_image_l = gt_bboxes_per_image_l[:,None].repeat(1, total_num_anchors)
         gt_bboxes_per_image_r = gt_bboxes_per_image_l + gt_bboxes_per_image[:,2].unsqueeze(1)
 
-        gt_bboxes_per_image_t = gt_bboxes_per_image[:, 1] - (0.5 * gt_bboxes_per_image[:, 3]).long()
+        gt_bboxes_per_image_t = gt_bboxes_per_image[:, 1] - (0.5 * gt_bboxes_per_image[:, 3])
         gt_bboxes_per_image_t = gt_bboxes_per_image_t[:,None].repeat(1, total_num_anchors)
         gt_bboxes_per_image_b = gt_bboxes_per_image_t + gt_bboxes_per_image[:,3].unsqueeze(1)
 
@@ -1008,11 +1017,11 @@ class IOUloss(nn.Module):
     def forward(self, pred, target):
         assert pred.shape[0] == target.shape[0]
 
-        pred = pred.view(-1, 4)
-        target = target.view(-1, 4)
+        pred = pred.float().view(-1, 4)
+        target = target.float().view(-1, 4)
         tl_p = pred[:, :2] - pred[:, 2:] / 2
         br_p = pred[:, :2] + pred[:, 2:] / 2
-        tl_t = target[:, :2] - (target[:, 2:] * 0.5).long()
+        tl_t = target[:, :2] - (target[:, 2:] * 0.5)
         br_t = tl_t + target[:, 2:]
         tl = torch.max(tl_p, tl_t)
         br = torch.min(br_p, br_t)
@@ -1055,6 +1064,7 @@ def reduce_mean(tensor):
 
 @torch.jit.ignore
 def postprocess(prediction, num_classes, conf_thre=0.7, nms_thre=0.45, class_agnostic=False):
+    prediction = prediction.float()
     box_corner = prediction.new(prediction.shape)
     box_corner[:, :, 0] = prediction[:, :, 0] - prediction[:, :, 2] / 2
     box_corner[:, :, 1] = prediction[:, :, 1] - prediction[:, :, 3] / 2
@@ -1102,6 +1112,7 @@ def postprocess(prediction, num_classes, conf_thre=0.7, nms_thre=0.45, class_agn
 
 @torch.jit.ignore
 def bboxes_iou(bboxes_a, bboxes_b, xyxy=True):
+    bboxes_a, bboxes_b = bboxes_a.float(), bboxes_b.float()
     if bboxes_a.shape[1] != 4 or bboxes_b.shape[1] != 4:
         raise IndexError
 
@@ -1111,8 +1122,8 @@ def bboxes_iou(bboxes_a, bboxes_b, xyxy=True):
         area_a = torch.prod(bboxes_a[:, 2:] - bboxes_a[:, :2], 1)
         area_b = torch.prod(bboxes_b[:, 2:] - bboxes_b[:, :2], 1)
     else:
-        tl_a = bboxes_a[:, :2] - (bboxes_a[:, 2:] * 0.5).long()
-        tl_b = bboxes_b[:, :2] - (bboxes_b[:, 2:] * 0.5).long()
+        tl_a = bboxes_a[:, :2] - (bboxes_a[:, 2:] * 0.5)
+        tl_b = bboxes_b[:, :2] - (bboxes_b[:, 2:] * 0.5)
         br_a = tl_a + bboxes_a[:, 2:]
         br_b = tl_b + bboxes_b[:, 2:]
         tl = torch.max(tl_a[:,None], tl_b[None,:])
@@ -1121,7 +1132,7 @@ def bboxes_iou(bboxes_a, bboxes_b, xyxy=True):
         area_b = torch.prod(bboxes_b[:, 2:], 1)
     en = (tl < br).type(tl.type()).prod(dim=2)
     area_i = torch.prod(br - tl, 2) * en  # * ((tl < br).all())
-    return area_i / (area_a[:, None] + area_b - area_i)
+    return area_i / (area_a[:, None] + area_b - area_i).clamp_min(1e-16)
 
 def get_activation(name="silu", inplace=True):
     if name == "silu":
