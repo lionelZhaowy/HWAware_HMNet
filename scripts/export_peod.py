@@ -72,7 +72,7 @@ def main():
         checks=checks,failures=[f"{x['case']}/{x['output']}" for x in checks if not x['passed']],
         input_shapes={n:list(x.shape) for n,x in zip(inputs,(*frames[0],*states))},output_shapes={n:list(x.shape) for n,x in zip(outputs,want)},
         modality=modality,temporal_window=window,state_feedback='independent_PyTorch_ORT_trajectories',precision='CPU_FP32',
-        weights=dict(kind=weight_kind,path=str(Path(a.checkpoint).resolve()),sha256=sha_file(a.checkpoint),step=saved['step'],source='bounded_smoke_official_B1_initialization'),
+        weights=dict(kind=weight_kind,path=str(Path(a.checkpoint).resolve()),sha256=sha_file(a.checkpoint),step=saved['step'],source='diagnostic_subset_checkpoint' if c['event_data'].get('diagnostic_subset') else 'training_checkpoint', initialization=c.get('initialization')),
         code_commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),
         code_worktree_dirty=bool(subprocess.check_output(['git','status','--porcelain'],cwd=ROOT,text=True)),
         source_sha256={str(p.relative_to(ROOT)):sha_file(p) for base in ('hmnet','scripts') for p in (ROOT/base).rglob('*.py')},
