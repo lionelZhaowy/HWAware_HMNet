@@ -1,0 +1,10 @@
+schema = "peod_sequence_development_v1"
+selection_seed = 42
+candidate_count = 10000
+train_sequences = ["sequence_001", "sequence_002", "sequence_003", "sequence_006", "sequence_008", "sequence_009", "sequence_011", "sequence_012", "sequence_013", "sequence_014", "sequence_016", "sequence_017", "sequence_018", "sequence_019", "sequence_021", "sequence_022", "sequence_023", "sequence_024", "sequence_025", "sequence_026", "sequence_027", "sequence_028", "sequence_029", "sequence_033", "sequence_034", "sequence_036", "sequence_037", "sequence_038", "sequence_039", "sequence_041", "sequence_042", "sequence_044", "sequence_045", "sequence_046", "sequence_049", "sequence_050", "sequence_051", "sequence_052", "sequence_055", "sequence_056", "sequence_057", "sequence_059", "sequence_060", "sequence_061", "sequence_062", "sequence_064", "sequence_065", "sequence_066", "sequence_068", "sequence_069", "sequence_070", "sequence_071", "sequence_072", "sequence_074", "sequence_075", "sequence_076", "sequence_077", "sequence_079", "sequence_080", "sequence_081", "sequence_084", "sequence_086", "sequence_087", "sequence_088", "sequence_089", "sequence_090", "sequence_092", "sequence_095", "sequence_096", "sequence_097"]
+dev_sequences = ["sequence_004", "sequence_005", "sequence_007", "sequence_015", "sequence_031", "sequence_032", "sequence_035", "sequence_040", "sequence_047", "sequence_048", "sequence_054", "sequence_058", "sequence_067", "sequence_078", "sequence_082", "sequence_085", "sequence_091", "sequence_094"]
+
+[parent_sha256]
+train = "7d3e576167749346abd0e2ab848af6bd06769e6bbc934660aea233e28db91f8b"
+val = "99fec5b619ed356b6d5cd549447e76df4f9d6159c42b49f8dcad2024b8e9275a"
+test = "d019c75d0c6ad7bab1124779f478f36a79074957d47ba7f1c2143072c0dd6c13"
