@@ -1,3 +1,5 @@
+本分支为 **PEOD原生720P RecipeV2**，请先阅读[新实验配置与手动命令](README_PEOD_RECIPE_V2.md)。下文保留父工程历史说明。
+
 > **PEOD 原生720P工程：** 完整200轮新基线、batch8/累积4及当前运行命令见[实验说明](experiments/task_temporal/PEOD.md)。下文保留继承来源工程的历史说明。
 
 > 本分支同步v1.2_T检测/深度实验请先读[新任务入口](experiments/task_temporal/README.md)；下文保留的旧frame/HMNet命令不代表新M=2实验。

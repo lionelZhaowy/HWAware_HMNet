@@ -11,7 +11,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from hmnet.models.efficientvit_tasks import build_frame_task, ROOT
-from hmnet.dataset.peod_frames import PEODFrames
+from hmnet.dataset.peod_recipe import PEODRecipeFrames, PRECISION_CONTRACT
 from hmnet.dataset.task_frames import sha_file
 from hmnet.dataset.custom_collate_fn import collate_keep_dict
 from hmnet.dataset.temporal_frames import SequenceBatchSampler
@@ -23,6 +23,10 @@ def parser():
     defaults=tomllib.loads((ROOT/'experiments/task_temporal/experiment.toml').read_text())
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('action',choices=['train','eval'])
+    p.add_argument('--recipe',choices=['a0','a1'],default='a0')
+    p.add_argument('--selection',default=str(ROOT/'experiments/task_temporal/development_split.toml'))
+    p.add_argument('--weights',choices=['raw','ema'],default=None,help='Explicit raw/EMA for full checkpoint; best files infer their saved kind')
+    p.add_argument('--smoke-validation',action='store_true',help='Bounded diagnostic only: evaluate 16-frame dev/fixed-val views')
     p.add_argument('--dataset',choices=['peod'],default='peod')
     p.add_argument('--modality',choices=['rgb','dvs','rgbdvs'],default=defaults.get('modality','rgbdvs'))
     p.add_argument('--representation',choices=['rvt_histogram','polarity_binary'],default=defaults['representation'])
@@ -32,7 +36,7 @@ def parser():
     p.add_argument('--eval-batch',type=int,default=defaults['eval_batch']);p.add_argument('--workers',type=int,default=defaults['workers'])
     p.add_argument('--seed',type=int,default=defaults['seed']);p.add_argument('--limit',type=int,default=0);p.add_argument('--stop-after',type=int)
     p.add_argument('--precision',choices=['bf16','fp32'],default=defaults['precision']);p.add_argument('--device',default='cuda:0')
-    p.add_argument('--learning-rate',type=float,default=defaults['learning_rate'])
+    p.add_argument('--learning-rate',type=float,default=None)
     p.add_argument('--min-learning-rate',type=float,default=defaults['min_learning_rate'])
     p.add_argument('--warmup-epochs',type=float,default=defaults['warmup_epochs'])
     p.add_argument('--warmup-start-factor',type=float,default=defaults['warmup_start_factor'])
@@ -44,30 +48,44 @@ def parser():
 def configuration(a):
     defaults=tomllib.loads((ROOT/'experiments/task_temporal/experiment.toml').read_text())
     temporal=0 if a.modality=='rgb' else 2
-    name=f'peod_720p_{a.modality}_{"none" if a.modality=="rgb" else a.representation}'
+    learning_rate = a.learning_rate if a.learning_rate is not None else (5e-4 if a.recipe=='a0' else 1e-4)
+    if a.smoke_validation and not (a.limit and a.stop_after):
+        raise ValueError('--smoke-validation requires bounded --limit and --stop-after')
+    name=f'peod_720p_recipe_v2_{a.modality}_{"none" if a.modality=="rgb" else a.representation}_{a.recipe}_seed{a.seed}'
     pretrained=ROOT/'pretrained/efficientvit_b1_r224.pth'
     c=SimpleNamespace(task='detection',dataset='peod',modality=a.modality,event_representation=a.representation,
         event_channels=0 if a.modality=='rgb' else (20 if a.representation=='rvt_histogram' else 2),
         temporal_window=temporal,sequential_sampling=True,fusion_mode='add',data_root=a.data_root,
         deterministic=True,epochs=a.epochs,updates=None,batch_size=a.batch,eval_batch_size=a.eval_batch,
-        accumulation=a.accumulation,epoch_accumulation=True,workers=a.workers,prefetch_factor=defaults['prefetch_factor'],learning_rate=a.learning_rate,weight_decay=defaults['weight_decay'],
+        accumulation=a.accumulation,epoch_accumulation=True,workers=a.workers,prefetch_factor=defaults['prefetch_factor'],learning_rate=learning_rate,weight_decay=defaults['weight_decay'],
         precision=a.precision,lr_schedule='warmup_cosine',min_learning_rate=a.min_learning_rate,warmup_epochs=a.warmup_epochs,
         warmup_start_factor=a.warmup_start_factor,eval_every_epochs=defaults['eval_every_epochs'],resume=a.resume or '',start_new_stage=False,output=a.output or str(ROOT/'logs/detection'/name))
     c.initialization_contract=dict(official_b1_sha256=sha_file(pretrained),method='named_component_sha256_seed_v1',seed=a.seed,
         binary_stem='official_RGB_mean_times_3_over_2',init_from=None)
-    c.peod_contract=dict(classes=['car','person','bus','truck','2-wheeler','3-wheeler'],workers=a.workers,
+    c.ema_contract=dict(version='fp32_params_and_buffers_optimizer_update_v1',decay=0.9998,tau=2000.0,integer_buffers='copy',validation_state='independent_sequence_streams',checkpoint_milestones=[20,40,60])
+    c.checkpoint_milestones=[20,40,60]
+    c.reference_eval_every_epochs=1 if a.smoke_validation else 20
+    c.peod_contract=dict(precision_contract=PRECISION_CONTRACT,selection_sha256=sha_file(a.selection),recipe=a.recipe,
+        reference_eval_every_epochs=c.reference_eval_every_epochs,diagnostic_validation_limit=16 if a.smoke_validation else 0,classes=['car','person','bus','truck','2-wheeler','3-wheeler'],workers=a.workers,
         prefetch_factor=1,persistent_workers=a.workers>0,pin_memory=True,multiprocessing_context='spawn',eval_batch=a.eval_batch,
         eval_precision=a.precision,score_threshold=.01,nms_iou=.65,gradient_clip=None,
-        validation='every_epoch_COCO_mAP',main_checkpoint='last_epoch',best_checkpoint='val_mAP_separate',
+        validation='every_epoch_dev_COCO_mAP_raw_and_ema',main_checkpoint='last_epoch_full_resume',best_checkpoint='separate_dev_raw_and_ema_inference_only',
         geometry='native_720x1280_no_external_padding_same_conv_ceil_features',rgb='ImageNet_normalization',augmentation='lane_consistent_horizontal_flip',
         optimizer='AdamW_default_betas_eps',evaluation='original_float_COCO_all_frames_no_GEN1_filter')
     c.get_model=lambda:build_frame_task('detection',str(pretrained),modality=a.modality,temporal_window=temporal,
             event_channels=c.event_channels if temporal else 20,num_classes=6,stable_seed=a.seed)
-    c.get_dataset=lambda:PEODFrames(a.data_root,'train',a.representation,a.modality,True,a.limit)
+    c.get_dataset=lambda:PEODRecipeFrames(a.data_root,'train',a.representation,a.modality,True,a.limit,selection=a.selection)
     # A bounded smoke does not perform a full validation sweep; the protocol remains fixed.
-    if not a.stop_after:
-        c.get_validation_dataset=lambda:PEODFrames(a.data_root,'val',a.representation,a.modality)
-        c.evaluate_validation=lambda model,data:score_model(model,data,a.eval_batch,a.workers,a.precision)[0]
+    if not a.stop_after or a.smoke_validation:
+        val_limit=16 if a.smoke_validation else 0
+        c.get_validation_dataset=lambda:PEODRecipeFrames(a.data_root,'dev',a.representation,a.modality,limit=val_limit,selection=a.selection)
+        c.get_reference_validation_dataset=lambda:PEODRecipeFrames(a.data_root,'val',a.representation,a.modality,limit=val_limit,selection=a.selection)
+        def validation(model,data):
+            metrics,rows=score_model(model,data,a.eval_batch,a.workers,a.precision)
+            metrics['subsets']={condition:score_dump([r for r in rows if r['condition']==condition],data.manifest['classes'])
+                for condition in sorted({r['condition'] for r in rows})}
+            return metrics
+        c.evaluate_validation=validation
     return c
 
 
@@ -87,10 +105,16 @@ def score_dump(rows,classes):
         det=COCO();det.dataset=dict(images=images,annotations=[],categories=categories);det.createIndex()
     ev=COCOeval(coco,det,'bbox');ev.evaluate();ev.accumulate();ev.summarize()
     metrics=dict(mAP=float(ev.stats[0]),AP50=float(ev.stats[1]),AP75=float(ev.stats[2]),
-        AP_small=float(ev.stats[3]),AP_medium=float(ev.stats[4]),AP_large=float(ev.stats[5]),classes={},class_support={})
+        AP_small=float(ev.stats[3]),AP_medium=float(ev.stats[4]),AP_large=float(ev.stats[5]),classes={},class_support={},class_metrics={})
     for i,name in enumerate(classes):
         values=ev.eval['precision'][:,:,i,0,-1];values=values[values>=0]
         metrics['classes'][name]=float(values.mean()) if len(values) else None
+        def mean_valid(values):
+            values=values[values>=0];return float(values.mean()) if len(values) else None
+        precision=ev.eval['precision'][:,:,i,:,-1]
+        metrics['class_metrics'][name]=dict(AP=metrics['classes'][name],AP50=mean_valid(precision[0,:,0]),
+            AP75=mean_valid(precision[5,:,0]),small=mean_valid(precision[:,:,1]),
+            medium=mean_valid(precision[:,:,2]),large=mean_valid(precision[:,:,3]))
         metrics['class_support'][name]=dict(gt=sum(a['category_id']==i for r in rows for a in r['gt']),
             sequences=len({r.get('sequence',r['index'] if 'index' in r else 0) for r in rows if any(a['category_id']==i for a in r['gt'])}))
     return metrics
@@ -132,22 +156,31 @@ def score_model(model,data,batch,workers,precision,dump=None):
 def evaluate(c,a):
     checkpoint=a.checkpoint or str(Path(c.output)/'checkpoint.pth')
     state=torch.load(checkpoint,map_location='cpu',weights_only=False);saved=state['training_contract']
-    data=PEODFrames(a.data_root,a.split,a.representation,a.modality,limit=a.limit)
-    train_contract=PEODFrames(a.data_root,'train',a.representation,a.modality,limit=saved['event_data']['limit']).data_contract
+    data=PEODRecipeFrames(a.data_root,a.split,a.representation,a.modality,limit=a.limit,selection=a.selection)
+    train_contract=PEODRecipeFrames(a.data_root,'train',a.representation,a.modality,limit=saved['event_data']['limit'],selection=a.selection).data_contract
     expected_window=c.temporal_window
+    if saved.get('peod',{}).get('precision_contract')!=PRECISION_CONTRACT:
+        raise ValueError('Checkpoint target/geometry precision contract differs')
     if (saved['task']!='detection' or saved['modality']!=a.modality or saved['event_input']!=data.input_spec or
         saved['event_data']!=train_contract or saved.get('temporal',{}).get('window',0)!=expected_window or
         saved['initialization']!=c.initialization_contract):raise ValueError('PEOD evaluation checkpoint contract differs')
-    model=c.get_model().to(a.device).eval();model.load_state_dict(state['state_dict'],strict=True)
+    model=c.get_model().to(a.device).eval()
+    weight_kind=a.weights or state.get('weight_kind','raw')
+    if state.get('inference_only'):
+        if weight_kind!=state['weight_kind']:raise ValueError('Requested weight kind differs from inference checkpoint')
+        weights=state['state_dict']
+    else:
+        weights=state['ema']['state_dict'] if weight_kind=='ema' else state['state_dict']
+    model.load_state_dict(weights,strict=True)
     out=Path(a.output or ROOT/f'artifacts/evaluation/{a.split}');out.mkdir(parents=True,exist_ok=True)
     dump=a.dump or str(out/'predictions.jsonl')
     metrics,rows=score_model(model,data,a.eval_batch,a.workers,a.precision,dump)
-    report=dict(metrics=metrics,frames=len(data),scored_frames=len(rows),split=a.split,step=state['step'],
+    report=dict(weight_kind=weight_kind,metrics=metrics,frames=len(data),scored_frames=len(rows),split=a.split,step=state['step'],
         checkpoint=str(Path(checkpoint).resolve()),checkpoint_sha256=sha_file(checkpoint),data_contract=data.data_contract,
         input=data.input_spec,precision=a.precision,eval_batch=a.eval_batch,dump=str(Path(dump).resolve()),dump_sha256=sha_file(dump),
         protocol='COCO bbox original 1280x720 floating GT, all frames including empty GT, no GEN1 filters',subsets={})
     if a.split=='test':
-        for subset in ('normal','challenge'):report['subsets'][subset]=score_dump([r for r in rows if r['condition']==subset],data.manifest['classes'])
+        for subset in sorted({r['condition'] for r in rows}):report['subsets'][subset]=score_dump([r for r in rows if r['condition']==subset],data.manifest['classes'])
     (out/'metrics.json').write_text(json.dumps(report,indent=2));print(out/'metrics.json')
 
 

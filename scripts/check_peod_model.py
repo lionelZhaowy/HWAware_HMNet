@@ -49,9 +49,9 @@ def main():
   pyramid=model.neck(list(features));raw=model.bbox_head.inference(pyramid)
  assert [list(f.shape[-2:]) for f in features]==[[180,320],[90,160],[45,80],[23,40]]
  assert [list(f.shape[-2:]) for f in pyramid]==[[90,160],[45,80],[23,40]]
- assert list(raw.shape)==[1,18920,11],raw.shape
- sampler=SequenceBatchSampler(data,8,training=True);seen=[key[0] for batch in sampler for key in batch];assert len(seen)==len(data)==len(set(seen))
- total=resolve_training_updates(c,len(sampler));schedule=training_schedule(c,len(sampler),total);assert total==342600 and schedule['warmup_updates']==8565
+ assert list(raw.shape)==[1,18920,11] and raw.dtype==torch.float32,(raw.shape,raw.dtype)
+ sampler=SequenceBatchSampler(data,8,training=True);seen=[key[0] for batch in sampler for key in batch];assert len(seen)==len(data)==len(set(seen))==44415
+ total=resolve_training_updates(c,len(sampler));schedule=training_schedule(c,len(sampler),total);assert total==83280 and schedule['warmup_updates']==6940
  # Published GT as perfect predictions; clipped training geometry scored separately.
  rows=[];roundtrip=[];val=PEODFrames(args.data_root,'val',modality='rgb')
  for i,s in enumerate(val.samples):
@@ -72,7 +72,7 @@ def main():
   features=[list(f.shape) for f in features],pyramid=[list(f.shape) for f in pyramid],raw_detections=list(raw.shape),
   temporal_pair_indices=[pair,pair+1],state_shapes=[list(s.shape) for s in state],state_dtype=[str(s.dtype) for s in state],history_effect=history_effect,
   bn_updates_per_two_forwards=2,activation_recomputation=False,all_samples_once=True,batches_per_epoch=len(sampler),
-  updates_per_epoch=1713,total_updates=total,schedule=schedule,first_lr=learning_rate_at(1,schedule),last_lr=learning_rate_at(total,schedule),
+  updates_per_epoch=1388,total_updates=total,schedule=schedule,first_lr=learning_rate_at(1,schedule),last_lr=learning_rate_at(total,schedule),
   geometry_oracle=oracle,geometry_clip_roundtrip=clipped,validation_frames=len(val))
  (out/'report.json').write_text(json.dumps(report,indent=2));print('PASS',c.modality,report['parameters'],flush=True)
 if __name__=='__main__':main()
