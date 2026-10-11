@@ -7,7 +7,7 @@ import torch
 import onnx
 import onnxruntime as ort
 from hmnet.models.efficientvit_tasks import build_frame_task,ROOT
-from hmnet.dataset.peod_frames import PEODFrames
+from hmnet.dataset.peod_recipe import PEODRecipeFrames, PRECISION_CONTRACT
 from hmnet.dataset.task_frames import sha_file
 from scripts.export_temporal_onnx import compare
 
@@ -26,19 +26,24 @@ class Graph(torch.nn.Module):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--checkpoint',required=True);p.add_argument('--data-root',required=True)
-    p.add_argument('--output',required=True);p.add_argument('--backbone-only',action='store_true');a=p.parse_args()
+    p.add_argument('--selection',default=str(ROOT/'experiments/task_temporal/development_split.toml'));p.add_argument('--weights',choices=['raw','ema'],default=None);p.add_argument('--output',required=True);p.add_argument('--backbone-only',action='store_true');a=p.parse_args()
     torch.set_num_threads(2);torch.manual_seed(42)
     saved=torch.load(a.checkpoint,map_location='cpu',weights_only=False);c=saved['training_contract']
     if c['event_data']['kind']!='peod':raise ValueError('PEOD checkpoint required')
     modality=c['modality'];rep=c['event_input']['representation'];window=c.get('temporal',{}).get('window',0)
-    data=PEODFrames(a.data_root,'train','rvt_histogram' if modality=='rgb' else rep,modality,limit=3)
+    data=PEODRecipeFrames(a.data_root,'train','rvt_histogram' if modality=='rgb' else rep,modality,limit=3,selection=a.selection)
+    if c.get('peod',{}).get('precision_contract')!=PRECISION_CONTRACT or c['peod']['selection_sha256']!=sha_file(a.selection):
+        raise ValueError('Recipe precision/development selection differs')
     if (data.manifest['geometry']!=c['event_data']['geometry'] or data.input_spec!=c['event_input']
             or data.data_contract['manifest_sha256']!=c['event_data']['manifest_sha256']
             or data.data_contract['source_signature']!=c['event_data']['source_signature']):
         raise ValueError('Export data/input/geometry contract differs')
     model=build_frame_task('detection',modality=modality,temporal_window=window,
         event_channels=20 if modality=='rgb' else c['event_input']['channels'],num_classes=6).eval()
-    model.load_state_dict(saved['state_dict'],strict=True);wrapper=Graph(model,a.backbone_only).eval()
+    weight_kind=a.weights or saved.get('weight_kind','raw')
+    if saved.get('inference_only') and weight_kind!=saved['weight_kind']:raise ValueError('Weight kind mismatch')
+    weights=saved['ema']['state_dict'] if weight_kind=='ema' and not saved.get('inference_only') else saved['state_dict']
+    model.load_state_dict(weights,strict=True);wrapper=Graph(model,a.backbone_only).eval()
     frames=[]
     for i in range(3):
         d,_,_=data[i];frames.append(tuple(d[k][None] for k in ('events','images') if d[k] is not None))
@@ -67,7 +72,7 @@ def main():
         checks=checks,failures=[f"{x['case']}/{x['output']}" for x in checks if not x['passed']],
         input_shapes={n:list(x.shape) for n,x in zip(inputs,(*frames[0],*states))},output_shapes={n:list(x.shape) for n,x in zip(outputs,want)},
         modality=modality,temporal_window=window,state_feedback='independent_PyTorch_ORT_trajectories',precision='CPU_FP32',
-        weights=dict(path=str(Path(a.checkpoint).resolve()),sha256=sha_file(a.checkpoint),step=saved['step'],source='bounded_smoke_official_B1_initialization'),
+        weights=dict(kind=weight_kind,path=str(Path(a.checkpoint).resolve()),sha256=sha_file(a.checkpoint),step=saved['step'],source='diagnostic_subset_checkpoint' if c['event_data'].get('diagnostic_subset') else 'training_checkpoint', initialization=c.get('initialization')),
         code_commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),
         code_worktree_dirty=bool(subprocess.check_output(['git','status','--porcelain'],cwd=ROOT,text=True)),
         source_sha256={str(p.relative_to(ROOT)):sha_file(p) for base in ('hmnet','scripts') for p in (ROOT/base).rglob('*.py')},
