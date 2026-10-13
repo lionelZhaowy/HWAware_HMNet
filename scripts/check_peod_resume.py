@@ -24,7 +24,7 @@ def main():
     defaults=parser().parse_args(['train'])
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--data-root',default=defaults.data_root);p.add_argument('--output',required=True)
     p.add_argument('--batch',type=int,default=defaults.batch);p.add_argument('--workers',type=int,default=defaults.workers)
-    p.add_argument('--accumulation',type=int,default=defaults.accumulation);p.add_argument('--tail-check',action='store_true');p.add_argument('--smoke-validation',action='store_true');p.add_argument('--recipe',choices=['a0','a1'],default='a0');a=p.parse_args()
+    p.add_argument('--accumulation',type=int,default=defaults.accumulation);p.add_argument('--tail-check',action='store_true');p.add_argument('--smoke-validation',action='store_true');p.add_argument('--recipe',choices=['a0','a1'],default='a0');p.add_argument('--torn-history',action='store_true');a=p.parse_args()
     if a.smoke_validation and not a.tail_check:raise ValueError('Smoke validation requires --tail-check')
     out=Path(a.output);out.mkdir(parents=True,exist_ok=True)
     # 67 samples produces 9 batches at batch8: 4+4+1 microbatches, final batch3.
@@ -37,6 +37,9 @@ def main():
             '--stop-after',str(end),'--output',str(dest)]
         command+=['--recipe',a.recipe]
         if a.smoke_validation:command+=['--smoke-validation']
+        if resume and a.torn_history:
+            with (dest/'metrics.jsonl').open('ab') as history:
+                history.write(b'{"step":3,"uncheckpointed":true}\n{"step":4,"unfinished":"')
         if resume:command+=['--resume',str(dest/'checkpoint.pth')]
         with (out/f'{mode}_{end}.log').open('w') as f:
             completed=subprocess.run(command,stdout=f,stderr=subprocess.STDOUT)
@@ -54,10 +57,16 @@ def main():
             for name,kind in [('best_checkpoint.pth','raw'),('best_ema_checkpoint.pth','ema')]:
                 best=torch.load(dest/name,map_location='cpu',weights_only=False)
                 assert best['inference_only'] and best['weight_kind']==kind and 'optimizer' not in best
-    report=dict(recipe=a.recipe,smoke_validation=a.smoke_validation,EMA_exact_resume=True,exact_resume=True,compared=list(x),step=x['step'],data_epoch=x['data_epoch'],data_cursor=x['data_cursor'],
+    report=dict(torn_history=a.torn_history,recipe=a.recipe,smoke_validation=a.smoke_validation,EMA_exact_resume=True,exact_resume=True,compared=list(x),step=x['step'],data_epoch=x['data_epoch'],data_cursor=x['data_cursor'],
         tail_check=a.tail_check,samples=[r['samples'] for r in rows],microbatches=[r['microbatches'] for r in rows],
         contract=x['training_contract'],commands=commands,
         pending_gradients='none: all checkpoints are optimizer-boundary; partial group flushed at epoch end')
+    if a.torn_history:
+        repaired=[json.loads(line) for line in (out/'split/metrics.jsonl').read_text().splitlines()]
+        assert [r['step'] for r in repaired]==list(range(1,steps+1))
+        assert all('uncheckpointed' not in r for r in repaired)
+        backups=list((out/'split/history_backups').glob('*.bak'))
+        assert len(backups)==1 and backups[0].read_bytes().endswith(b'{"step":4,"unfinished":"')
     if a.tail_check:
         assert report['samples']==[32,32,3,32,32,3];assert report['microbatches']==[4,4,1,4,4,1]
         assert sum(report['samples'])==134 and report['data_epoch']==1 and report['data_cursor']==9
