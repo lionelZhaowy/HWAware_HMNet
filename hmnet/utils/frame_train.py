@@ -21,6 +21,7 @@ from hmnet.dataset.temporal_frames import SequenceBatchSampler, manifest_signatu
 from hmnet.utils.temporal_streams import TemporalStreams
 from hmnet.utils.model_ema import ModelEMA
 from hmnet.utils.recipe_checkpoints import atomic_save, inference_checkpoint
+from hmnet.utils.resume_history import rewind_metrics_history
 
 
 def unpack(batch, task):
@@ -389,8 +390,8 @@ def _run(config, args, runtime):
     history = output / "metrics.jsonl"
     if runtime.primary:
         if config.resume and history.exists():
-            rows = [json.loads(line) for line in history.read_text().splitlines() if line.strip()]
-            history.write_text("".join(json.dumps(row) + "\n" for row in rows if row["step"] <= step))
+            recovery = rewind_metrics_history(history, step)
+            if recovery["changed"]:print(json.dumps(dict(resume_history=recovery)), flush=True)
         elif not config.resume:
             history.write_text("")
             if tensorboard_dir.exists():
