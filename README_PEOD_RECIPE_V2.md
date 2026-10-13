@@ -58,6 +58,7 @@ best文件会识别自身raw/EMA类型；完整checkpoint默认raw，需显式`-
 - `checkpoint.pth`：最近保存轮次的完整raw、EMA、优化器、日程契约、RNG、采样游标和时序状态，**唯一的严格resume入口**。每轮覆盖保存，突发中断后从最近保存点恢复。
 - `best_checkpoint.pth` / `best_ema_checkpoint.pth`：分别按dev mAP选择的raw/EMA，仅推理权重，不可resume。
 - `epoch_020/040/060_raw/ema.pth`：预定比较轮次的小型推理权重，不逐轮堆积。
+- resume自动回退metrics到已保存checkpoint的step。若最后一行因中断未写完，会先将原始字节备份到训练目录的`history_backups/`，再原子替换；中间损坏、带换行的损坏记录或非法step仍报错，不静默跳过。模型/优化器/EMA与训练日程不变。
 - 新旧数值、划分、EMA、LR、seed、batch契约不一致会拒绝resume；不支持静默迁移旧优化器。原子保存预留512MiB空间，空间不足时保留上一份检查点。
 - TensorBoard关注`dev/mAP`与`dev_ema/mAP`、逐类`AP_*`和`condition_*_mAP`；`fixed_val*`仅在预定轮次出现。开发集指标不得与旧val指标直接当作同协议增益。
 
@@ -68,3 +69,5 @@ best文件会识别自身raw/EMA类型；完整checkpoint默认raw，需显式`-
 ONNX导出入口为`scripts/export_peod.py`，支持raw/EMA并校验新数值/划分契约。结构检查、数值检查和部署验收分别报告；父版DVS时序状态的严格ONNX失败不能视为本轮自动通过。实施报告、实际检查结果、导出图路径和来源SHA统一保存在主工程`artifacts/peod_detection/native_720p/recipe_v2/20261011/`，不提交GitHub。
 
 当前只实施P0与第一阶段入口。片段采样、外观增强、参数分组衰减和门控融合须按第一阶段结果逐项选择；未混入当前A0/A1。尚无新正式训练精度结论。最终四模态对比另行固定共同胜出配方、预算与多个seed。
+
+日志恢复回归：`./scripts/hmnet-python scripts/check_resume_history.py -v`；GPU精确恢复对照可运行`scripts/check_peod_resume.py --recipe a1 --tail-check --smoke-validation --torn-history --output <主工程artifacts中的独立目录>`，不会写正式run。
